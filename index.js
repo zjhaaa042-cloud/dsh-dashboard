@@ -17,7 +17,7 @@
  */
 
 import { execFile } from 'node:child_process'
-import { readdir, readFile, stat } from 'node:fs/promises'
+import { open, readdir, readFile, stat } from 'node:fs/promises'
 import os from 'node:os'
 import { join } from 'node:path'
 
@@ -1555,6 +1555,81 @@ async function execRemote(origin, alias, command, timeoutMs) {
   }
 }
 
+/** Quote one shell argument for a POSIX remote command. */
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`
+}
+
+/** Read the last `maxBytes` of a local text file. */
+async function readTail(path, maxBytes = 8000) {
+  const handle = await open(path, 'r')
+  try {
+    const info = await handle.stat()
+    const length = Math.min(maxBytes, info.size)
+    if (length <= 0) return ''
+    const buffer = Buffer.alloc(length)
+    await handle.read(buffer, 0, length, info.size - length)
+    return buffer.toString('utf8')
+  } finally {
+    await handle.close()
+  }
+}
+
+/** Detail payload for one local snapshot item: directory listing or log tail. */
+async function readLocalDetail(path) {
+  const info = await statSafe(path)
+  if (info === null) return null
+  if (info.isDirectory()) {
+    const entries = await listSafe(path, 60)
+    const files = []
+    for (const entry of entries) {
+      const child = await statSafe(join(path, entry.name))
+      files.push({ name: entry.name, dir: entry.isDirectory(), size: child?.size ?? 0, mtime: child?.mtimeMs ?? 0 })
+    }
+    const candidate = files
+      .filter(file => file.dir === false && /\.(log|txt|out)$/i.test(file.name))
+      .sort((left, right) => right.mtime - left.mtime)[0]
+    let tail = ''
+    let tailName = ''
+    if (candidate !== undefined) {
+      try {
+        tail = await readTail(join(path, candidate.name))
+        tailName = candidate.name
+      } catch {
+        tail = ''
+      }
+    }
+    return { isDir: true, size: 0, mtime: info.mtimeMs, files, listing: '', tail, tailName }
+  }
+  return { isDir: false, size: info.size, mtime: info.mtimeMs, files: [], listing: '', tail: await readTail(path), tailName: '' }
+}
+
+/** Detail payload for one remote snapshot item, read through dsh-ssh exec. */
+async function readRemoteDetail(origin, alias, path) {
+  const remotePath = path.replace(/^[^/:]+:(?=\/)/, '')
+  const quoted = shellQuote(remotePath)
+  const statText = await execRemote(origin, alias, `stat -c '%F|%s|%Y' -- ${quoted}`, 15000)
+  const parts = statText.trim().split('|')
+  const type = parts[0] ?? ''
+  const size = Number(parts[1] ?? 0)
+  const mtime = Number(parts[2] ?? 0) * 1000
+  if (/directory/i.test(type)) {
+    const listing = await execRemote(origin, alias, `ls -la -- ${quoted}`, 15000)
+    let tail = ''
+    let tailName = ''
+    try {
+      const script = `f=$(ls -t -- ${quoted}/*.log ${quoted}/*.txt 2>/dev/null | head -n 1); if [ -n "$f" ]; then echo "--- $f ---"; tail -c 8000 -- "$f"; fi`
+      tail = await execRemote(origin, alias, script, 15000)
+      const first = tail.split('\n')[0] ?? ''
+      if (first.startsWith('--- ') && first.endsWith(' ---')) tailName = first.slice(4, -4)
+    } catch {
+      tail = ''
+    }
+    return { isDir: true, size: 0, mtime, files: [], listing, tail, tailName }
+  }
+  return { isDir: false, size, mtime, files: [], listing: '', tail: await execRemote(origin, alias, `tail -c 8000 -- ${quoted}`, 15000), tailName: '' }
+}
+
 /** Run the Python probe on the remote host and return its parsed payload. */
 async function scanRemote(origin, options) {
   const dataBase = options.remoteDownloadRoot.replace(/\/+raw\/?$/, '')
@@ -2104,6 +2179,33 @@ export function apply(ctx, config) {
     },
   }
 
+  const detail = {
+    kind: 'exact',
+    path: '/api/dino-dashboard/detail',
+    handler: async (request, response) => {
+      if (!isLoopbackRequest(request)) return writeJson(response, 403, { error: 'forbidden: loopback-only' })
+      if (request.method !== 'GET') return writeJson(response, 405, { error: 'method not allowed' })
+      const url = new URL(request.url ?? '/', 'http://localhost')
+      const source = url.searchParams.get('source') === 'remote' ? 'remote' : 'local'
+      const itemPath = url.searchParams.get('path') ?? ''
+      const kind = url.searchParams.get('kind') ?? ''
+      if (itemPath === '') return writeJson(response, 400, { error: 'path is required' })
+      try {
+        const data = await refresh(false)
+        const sections = [data.downloads?.items, data.training?.items, data.tests?.items, data.tasks?.items]
+        const allowed = sections.some(items => Array.isArray(items) && items.some(entry => entry.path === itemPath && (entry.source ?? 'local') === source))
+        if (!allowed) return writeJson(response, 404, { error: 'unknown item' })
+        const result = source === 'remote'
+          ? await readRemoteDetail(ctx.webServer.getOrigin(), options.remoteAlias, itemPath)
+          : await readLocalDetail(itemPath)
+        if (result === null) return writeJson(response, 404, { error: 'item not found' })
+        return writeJson(response, 200, { path: itemPath, source, kind, ...result })
+      } catch (error) {
+        return writeJson(response, 500, { error: error instanceof Error ? error.message : String(error) })
+      }
+    },
+  }
+
   const refreshStaging = () => {
     readStagingTransfers().then(value => { latestStaging = value }).catch(() => {})
   }
@@ -2114,7 +2216,7 @@ export function apply(ctx, config) {
   }, 'dino-dashboard: transfer tracker')
 
   ctx.effect(() => {
-    const disposers = [state, force, transfers, clearTransfers].map(route => ctx.webServer.register(route))
+    const disposers = [state, force, transfers, clearTransfers, detail].map(route => ctx.webServer.register(route))
     return () => {
       for (const dispose of disposers) dispose()
     }

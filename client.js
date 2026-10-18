@@ -68,6 +68,7 @@ window.__ModuleLoader__.load({
       'status.failed': '失败',
       'status.done': '已完成',
       'status.pending': '待开始',
+      'status.info': '信息',
       'task.heroLabel': '任务进度',
       'task.nextTag': '下一步',
       'task.meta': '{done}/{total} 已完成 · {datasets} 个数据集已转换 · manifest {manifests}/{datasets} · 下一步 {next}',
@@ -138,7 +139,36 @@ window.__ModuleLoader__.load({
       'toast.copied': '已复制路径',
       'toast.copyFailed': '复制失败',
       'row.copyHint': '点击复制路径',
-      'foot.hint': '点击条目复制路径',
+      'row.detailHint': '点击查看详情',
+      'detail.title': '详情',
+      'detail.close': '关闭',
+      'detail.path': '路径',
+      'detail.size': '大小',
+      'detail.time': '时间',
+      'detail.source': '来源',
+      'detail.status': '状态',
+      'detail.kind': '类型',
+      'detail.loading': '正在读取…',
+      'detail.error': '读取失败：{message}',
+      'detail.logTail': '日志末尾',
+      'detail.dirListing': '目录列表',
+      'detail.files': '目录内容',
+      'detail.dir': '目录',
+      'detail.emptyDir': '空目录',
+      'detail.copyPath': '复制路径',
+      'detail.metrics': '指标',
+      'detail.taskInfo': '任务说明',
+      'detail.evidence': '判断依据',
+      'detail.estimate': '预计',
+      'detail.direction': '方向',
+      'detail.phase': '阶段',
+      'detail.bytes': '已传输',
+      'detail.rate': '速率',
+      'detail.elapsed': '已用时间',
+      'detail.from': '来源',
+      'detail.to': '目标',
+      'detail.command': '命令',
+      'foot.hint': '点击条目查看详情 · 右侧图标复制路径',
     }
 
     const en = {
@@ -182,6 +212,7 @@ window.__ModuleLoader__.load({
       'status.failed': 'Failed',
       'status.done': 'Done',
       'status.pending': 'Pending',
+      'status.info': 'Info',
       'task.heroLabel': 'Task progress',
       'task.nextTag': 'Next',
       'task.meta': '{done}/{total} done · {datasets} datasets converted · manifest {manifests}/{datasets} · next {next}',
@@ -252,7 +283,36 @@ window.__ModuleLoader__.load({
       'toast.copied': 'Path copied',
       'toast.copyFailed': 'Copy failed',
       'row.copyHint': 'Click to copy path',
-      'foot.hint': 'Click a row to copy its path',
+      'row.detailHint': 'Click to view details',
+      'detail.title': 'Details',
+      'detail.close': 'Close',
+      'detail.path': 'Path',
+      'detail.size': 'Size',
+      'detail.time': 'Time',
+      'detail.source': 'Source',
+      'detail.status': 'Status',
+      'detail.kind': 'Type',
+      'detail.loading': 'Loading…',
+      'detail.error': 'Load failed: {message}',
+      'detail.logTail': 'Log tail',
+      'detail.dirListing': 'Directory listing',
+      'detail.files': 'Contents',
+      'detail.dir': 'dir',
+      'detail.emptyDir': 'Empty directory',
+      'detail.copyPath': 'Copy path',
+      'detail.metrics': 'Metrics',
+      'detail.taskInfo': 'Task',
+      'detail.evidence': 'Evidence',
+      'detail.estimate': 'Estimate',
+      'detail.direction': 'Direction',
+      'detail.phase': 'Phase',
+      'detail.bytes': 'Transferred',
+      'detail.rate': 'Rate',
+      'detail.elapsed': 'Elapsed',
+      'detail.from': 'From',
+      'detail.to': 'To',
+      'detail.command': 'Command',
+      'foot.hint': 'Click a row for details · icon copies the path',
     }
 
     const METRIC_LABEL = {
@@ -580,7 +640,7 @@ window.__ModuleLoader__.load({
     }
 
     /** One compact list row. */
-    function Row({ item, t, onCopy }) {
+    function Row({ item, t, onCopy, onOpen }) {
       const detail = itemDetail(item, t)
       const metrics = metricsText(item)
       const source = item.source === 'remote' ? t('source.remote') : t('source.local')
@@ -598,22 +658,29 @@ window.__ModuleLoader__.load({
             ? t('status.extracting')
             : item.status === 'running' ? t('status.running') : item.status === 'failed' ? t('status.failed') : ''
       const copyable = typeof item.path === 'string' && item.path !== ''
-      const title = copyable
-        ? `${item.path}${absolute === '' ? '' : `\n${absolute}`}\n${t('row.copyHint')}`
-        : isTransfer
-          ? (item.transfer?.command || item.transfer?.file || item.name)
-          : isTask && typeof item.task.evidence === 'string' && item.task.evidence !== ''
-            ? `${item.name}\n${item.task.evidence}`
-            : (absolute === '' ? item.name : `${item.name}\n${absolute}`)
+      const title = [
+        item.name,
+        copyable ? item.path : null,
+        isTransfer && typeof item.transfer?.command === 'string' ? item.transfer.command : null,
+        isTask && typeof item.task.evidence === 'string' ? item.task.evidence : null,
+        absolute,
+        copyable ? t('row.copyHint') : null,
+        t('row.detailHint'),
+      ].filter(Boolean).join('\n')
       const rowClass = `dd-row${item.status === 'failed' ? ' dd-row-failed' : item.status === 'running' ? ' dd-row-running' : ''}${isTask && item.task.next === true ? ' dd-row-next' : ''}`
       const extracting = item.kind === 'extract' && item.extract !== null && item.extract !== undefined && typeof item.extract.percent === 'number' && item.extract.state !== 'done'
       const taskBar = isTask && typeof item.task.percent === 'number' && item.task.percent > 0 && item.task.percent < 100
-      return h('button', {
-        type: 'button',
+      return h('div', {
+        role: 'button',
+        tabIndex: 0,
         className: rowClass,
         title,
-        onClick: () => {
-          if (copyable) onCopy(item)
+        onClick: () => onOpen(item),
+        onKeyDown: (event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault()
+            onOpen(item)
+          }
         },
       }, [
         h(Dot, { key: 'dot', tone: item.status }),
@@ -644,7 +711,24 @@ window.__ModuleLoader__.load({
           item.size > 0 && item.kind !== 'extract' ? h('span', { key: 'size', className: 'dd-row-size' }, formatBytes(item.size)) : null,
           isTransfer && item.status === 'running' ? null : (stamp === '' ? null : h('span', { key: 'time', className: 'dd-row-time' }, stamp)),
           copyable
-            ? h('span', { key: 'copy', className: 'dd-row-copy', 'aria-hidden': true }, h('svg', {
+            ? h('span', {
+                key: 'copy',
+                className: 'dd-row-copy',
+                role: 'button',
+                tabIndex: 0,
+                'aria-hidden': true,
+                onClick: (event) => {
+                  event.stopPropagation()
+                  onCopy(item)
+                },
+                onKeyDown: (event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault()
+                    event.stopPropagation()
+                    onCopy(item)
+                  }
+                },
+              }, h('svg', {
                 viewBox: '0 0 16 16',
                 width: 13,
                 height: 13,
@@ -658,6 +742,134 @@ window.__ModuleLoader__.load({
                 h('path', { key: 'b', d: 'M10.6 5.4V3.9c0-.8-.6-1.4-1.4-1.4H3.9c-.8 0-1.4.6-1.4 1.4v5.3c0 .8.6 1.4 1.4 1.4h1.5' }),
               ]))
             : null,
+          h('span', { key: 'chev', className: 'dd-row-chev', 'aria-hidden': true }, '›'),
+        ]),
+      ])
+    }
+
+    /** Localized status for the drawer. */
+    function statusLabel(item, t) {
+      if (item.kind === 'task') return item.status === 'done' ? t('status.done') : item.status === 'pending' ? t('status.pending') : t('status.running')
+      if (item.kind === 'transfer') return item.status === 'done' ? t('status.done') : t('status.running')
+      if (item.kind === 'extract' && item.status === 'running') return t('status.extracting')
+      if (item.status === 'running') return t('status.running')
+      if (item.status === 'failed') return t('status.failed')
+      if (item.status === 'passed') return t('status.passed')
+      if (item.status === 'done') return t('status.done')
+      return t('status.info')
+    }
+
+    /** Localized transfer phase. */
+    function phaseLabel(phase, t) {
+      if (phase === 'receiving') return t('transfer.phaseReceiving')
+      if (phase === 'sending') return t('transfer.phaseSending')
+      if (phase === 'process') return t('transfer.phaseProcess')
+      if (phase === 'done') return t('status.done')
+      return phase ?? ''
+    }
+
+    /** Slide-over detail view for one row. */
+    function DetailDrawer({ detail, t, onClose, onCopy }) {
+      if (detail === null) return null
+      const item = detail.item
+      const data = detail.data
+      const transfer = item.transfer === null || item.transfer === undefined ? null : item.transfer
+      const transferInfo = transfer === null ? null : directionInfo(transfer.direction, t)
+      const meta = (label, value) => h('div', { key: label, className: 'dd-dmeta' }, [
+        h('span', { key: 'label', className: 'dd-dmeta-label' }, label),
+        h('span', { key: 'value', className: 'dd-dmeta-value' }, value),
+      ])
+      const metaRows = [
+        meta(t('detail.status'), statusLabel(item, t)),
+        meta(t('detail.source'), item.source === 'remote' ? t('source.remote') : t('source.local')),
+        meta(t('detail.kind'), item.kind ?? '—'),
+        item.size > 0 ? meta(t('detail.size'), formatBytes(item.size)) : null,
+        item.mtime > 0 ? meta(t('detail.time'), new Date(item.mtime).toLocaleString()) : null,
+      ].filter(Boolean)
+      const pathRow = typeof item.path === 'string' && item.path !== ''
+        ? h('div', { key: 'path', className: 'dd-dmeta dd-dmeta-path' }, [
+            h('span', { key: 'label', className: 'dd-dmeta-label' }, t('detail.path')),
+            h('span', { key: 'value', className: 'dd-dmeta-value' }, item.path),
+            h('button', { key: 'copy', type: 'button', className: 'dd-dmeta-copy', onClick: () => onCopy(item) }, t('detail.copyPath')),
+          ])
+        : null
+      const metrics = item.metrics !== null && item.metrics !== undefined && typeof item.metrics === 'object'
+        ? Object.keys(item.metrics).map(key => meta(METRIC_LABEL[key] ?? key, formatMetric(item.metrics[key])))
+        : []
+      const taskRows = item.kind === 'task' && item.task !== null && item.task !== undefined
+        ? [
+            meta(t('detail.taskInfo'), `${item.task.id ?? ''} ${item.task.title ?? ''}`.trim()),
+            typeof item.task.percent === 'number' ? meta(t('detail.status'), `${item.task.percent}%`) : null,
+            typeof item.task.evidence === 'string' && item.task.evidence !== '' ? meta(t('detail.evidence'), item.task.evidence) : null,
+            typeof item.task.estimate === 'string' && item.task.estimate !== '' ? meta(t('detail.estimate'), item.task.estimate) : null,
+          ].filter(Boolean)
+        : []
+      const transferRows = transfer === null
+        ? []
+        : [
+            transferInfo === null ? null : meta(t('detail.direction'), `${transferInfo.arrow} ${transferInfo.label}`),
+            typeof transfer.phase === 'string' && transfer.phase !== '' ? meta(t('detail.phase'), phaseLabel(transfer.phase, t)) : null,
+            item.size > 0 ? meta(t('detail.bytes'), formatBytes(item.size)) : null,
+            typeof transfer.rate === 'number' && transfer.rate > 0 ? meta(t('detail.rate'), `${formatBytes(transfer.rate)}/s`) : null,
+            typeof transfer.elapsedMs === 'number' ? meta(t('detail.elapsed'), formatDuration(transfer.elapsedMs)) : null,
+            typeof transfer.etime === 'string' && transfer.etime !== '' ? meta(t('detail.elapsed'), transfer.etime) : null,
+            typeof transfer.sourcePath === 'string' && transfer.sourcePath !== '' ? meta(t('detail.from'), transfer.sourcePath) : null,
+            typeof transfer.destPath === 'string' && transfer.destPath !== '' ? meta(t('detail.to'), transfer.destPath) : null,
+            typeof transfer.command === 'string' && transfer.command !== '' ? meta(t('detail.command'), transfer.command) : null,
+          ].filter(Boolean)
+      const files = data !== null && data !== undefined && Array.isArray(data.files) ? data.files : []
+      const listing = data !== null && data !== undefined && typeof data.listing === 'string' ? data.listing.trim() : ''
+      const tail = data !== null && data !== undefined && typeof data.tail === 'string' ? data.tail.trim() : ''
+      const tailName = data !== null && data !== undefined && typeof data.tailName === 'string' ? data.tailName : ''
+      return h('div', { key: 'drawer-wrap', className: 'dd-drawer-wrap' }, [
+        h('div', { key: 'backdrop', className: 'dd-backdrop', onClick: onClose }),
+        h('aside', { key: 'panel', className: 'dd-drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': t('detail.title') }, [
+          h('header', { key: 'head', className: 'dd-drawer-head' }, [
+            h('div', { key: 'titles', className: 'dd-drawer-titles' }, [
+              h('span', { key: 'name', className: 'dd-drawer-name' }, item.name),
+              h('span', { key: 'tags', className: 'dd-drawer-tags' }, [
+                h('span', { key: 'status', className: `dd-row-pill dd-row-pill-${item.status}` }, statusLabel(item, t)),
+                transferInfo === null ? null : h('span', { key: 'direction', className: 'dd-tag dd-tag-transfer' }, `${transferInfo.arrow} ${transferInfo.label}`),
+              ]),
+            ]),
+            h('button', { key: 'close', type: 'button', className: 'dd-drawer-close', onClick: onClose, 'aria-label': t('detail.close') }, '×'),
+          ]),
+          h('div', { key: 'body', className: 'dd-drawer-body' }, [
+            h('dl', { key: 'meta', className: 'dd-drawer-meta' }, metaRows),
+            pathRow,
+            taskRows.length === 0 ? null : h('dl', { key: 'task', className: 'dd-drawer-meta' }, taskRows),
+            transferRows.length === 0 ? null : h('dl', { key: 'transfer', className: 'dd-drawer-meta' }, transferRows),
+            metrics.length === 0 ? null : h('div', { key: 'metrics', className: 'dd-drawer-section' }, [
+              h('h3', { key: 'title', className: 'dd-drawer-title' }, t('detail.metrics')),
+              h('dl', { key: 'list', className: 'dd-drawer-meta' }, metrics),
+            ]),
+            detail.loading === true ? h('p', { key: 'loading', className: 'dd-drawer-note' }, t('detail.loading')) : null,
+            detail.error !== null && detail.error !== undefined ? h('p', { key: 'error', className: 'dd-drawer-error' }, fmt(t, 'detail.error', { message: detail.error })) : null,
+            files.length > 0
+              ? h('div', { key: 'files', className: 'dd-drawer-section' }, [
+                  h('h3', { key: 'title', className: 'dd-drawer-title' }, t('detail.files')),
+                  h('ul', { key: 'list', className: 'dd-dfiles' }, files.map(file => h('li', { key: file.name, className: 'dd-dfile' }, [
+                    h('span', { key: 'name', className: 'dd-dfile-name' }, file.name),
+                    h('span', { key: 'size', className: 'dd-dfile-size' }, file.dir === true ? t('detail.dir') : formatBytes(file.size)),
+                  ]))),
+                ])
+              : null,
+            listing !== ''
+              ? h('div', { key: 'listing', className: 'dd-drawer-section' }, [
+                  h('h3', { key: 'title', className: 'dd-drawer-title' }, t('detail.dirListing')),
+                  h('pre', { key: 'pre', className: 'dd-drawer-pre' }, listing),
+                ])
+              : null,
+            tail !== ''
+              ? h('div', { key: 'tail', className: 'dd-drawer-section' }, [
+                  h('h3', { key: 'title', className: 'dd-drawer-title' }, tailName === '' ? t('detail.logTail') : `${t('detail.logTail')} · ${tailName}`),
+                  h('pre', { key: 'pre', className: 'dd-drawer-pre' }, tail),
+                ])
+              : null,
+            files.length === 0 && listing === '' && tail === '' && data !== null && data !== undefined && data.isDir === true
+              ? h('p', { key: 'empty-dir', className: 'dd-drawer-note' }, t('detail.emptyDir'))
+              : null,
+          ]),
         ]),
       ])
     }
@@ -817,6 +1029,7 @@ window.__ModuleLoader__.load({
       const [toast, setToast] = React.useState(null)
       const [query, setQuery] = React.useState('')
       const [transferData, setTransferData] = React.useState(null)
+      const [detail, setDetail] = React.useState(null)
       const alive = React.useRef(true)
       const busy = React.useRef(false)
 
@@ -962,6 +1175,32 @@ window.__ModuleLoader__.load({
         const ok = await copyText(item.path)
         setToast({ id: Date.now(), message: t(ok ? 'toast.copied' : 'toast.copyFailed') })
       }, [t])
+
+      const openDetail = React.useCallback(async (item) => {
+        setDetail({ item, data: null, loading: true, error: null })
+        if (typeof item.path !== 'string' || item.path === '' || item.kind === 'transfer') {
+          setDetail({ item, data: null, loading: false, error: null })
+          return
+        }
+        try {
+          const url = `${API}/detail?source=${encodeURIComponent(item.source ?? 'local')}&path=${encodeURIComponent(item.path)}&kind=${encodeURIComponent(item.kind ?? '')}`
+          const response = await fetch(url, { cache: 'no-store', headers: { accept: 'application/json' } })
+          if (!response.ok) throw new Error(`HTTP ${response.status}`)
+          const payload = await response.json()
+          setDetail({ item, data: payload, loading: false, error: null })
+        } catch (error) {
+          setDetail({ item, data: null, loading: false, error: error instanceof Error ? error.message : String(error) })
+        }
+      }, [])
+
+      React.useEffect(() => {
+        if (detail === null) return undefined
+        const onKeyDown = (event) => {
+          if (event.key === 'Escape') setDetail(null)
+        }
+        window.addEventListener('keydown', onKeyDown)
+        return () => window.removeEventListener('keydown', onKeyDown)
+      }, [detail])
 
       const warnings = []
       if (state.error !== null) warnings.push(h('div', { key: 'load', className: 'dd-warn' }, fmt(t, 'error.load', { message: state.error })))
@@ -1136,12 +1375,13 @@ window.__ModuleLoader__.load({
               ? h(Skeleton, { key: 'skeleton' })
               : visibleItems.length === 0
                 ? h('p', { key: 'empty', className: 'dd-empty' }, noMatches ? t('empty.search') : all.length > 0 ? t('empty.filtered') : t(`empty.${activeTab}`))
-                : h('ul', { key: 'list', className: 'dd-list' }, visibleItems.map((entry) => h(Row, { key: entry.id, item: entry, t, onCopy: copy }))),
+                : h('ul', { key: 'list', className: 'dd-list' }, visibleItems.map((entry) => h(Row, { key: entry.id, item: entry, t, onCopy: copy, onOpen: openDetail }))),
           ]),
           h('footer', { key: 'foot', className: 'dd-foot' }, [
             h('span', { key: 'hint' }, t('foot.hint')),
           ]),
         ]),
+        h(DetailDrawer, { key: 'drawer', detail, t, onClose: () => setDetail(null), onCopy: copy }),
         toast === null ? null : h('div', { key: 'toast', className: 'dd-toast' }, toast.message),
       ])
     }
@@ -1304,6 +1544,37 @@ window.__ModuleLoader__.load({
       '.dd-row-size{color:var(--dsw-alias-label-secondary)}',
       '.dd-row-time{color:var(--dsw-alias-label-secondary)}',
       '.dd-row-copy{display:grid;place-items:center;color:var(--dsw-alias-label-secondary);opacity:0;transition:opacity .12s}',
+      '.dd-row:hover .dd-row-copy,.dd-row-copy:focus-visible{opacity:1}',
+      '.dd-row-copy:hover{color:var(--dsw-alias-brand-primary)}',
+      '.dd-row-chev{margin-left:2px;color:var(--dsw-alias-label-secondary);font-size:17px;line-height:1;opacity:.35}',
+      '.dd-row:hover .dd-row-chev{opacity:.75}',
+      '.dd-drawer-wrap{position:fixed;inset:0;z-index:60}',
+      '.dd-backdrop{position:absolute;inset:0;background:rgba(0,0,0,.22)}',
+      '.dd-drawer{position:absolute;top:0;right:0;bottom:0;width:min(560px,94vw);display:flex;flex-direction:column;background:var(--dsw-alias-bg-layer-2);border-left:1px solid var(--dsw-alias-border-l1);box-shadow:-16px 0 40px rgba(0,0,0,.18)}',
+      '.dd-drawer-head{display:flex;align-items:flex-start;gap:10px;padding:13px 14px;border-bottom:1px solid var(--dsw-alias-border-l1);flex:none}',
+      '.dd-drawer-titles{min-width:0;display:flex;flex-direction:column;gap:5px}',
+      '.dd-drawer-name{font-size:14px;font-weight:650;line-height:19px;color:var(--dsw-alias-label-primary);word-break:break-all}',
+      '.dd-drawer-tags{display:flex;align-items:center;gap:6px;flex-wrap:wrap}',
+      '.dd-drawer-close{margin-left:auto;flex:none;width:26px;height:26px;border:1px solid var(--dsw-alias-border-l1);border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary);font-size:17px;line-height:1;cursor:pointer}',
+      '.dd-drawer-close:hover{color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-brand-primary)}',
+      '.dd-drawer-body{padding:13px 14px 20px;overflow:auto;display:flex;flex-direction:column;gap:12px}',
+      '.dd-drawer-meta{margin:0;display:flex;flex-direction:column;gap:4px}',
+      '.dd-dmeta{display:flex;align-items:baseline;gap:8px;font-size:11.5px;line-height:17px}',
+      '.dd-dmeta-label{flex:none;min-width:64px;color:var(--dsw-alias-label-secondary)}',
+      '.dd-dmeta-value{min-width:0;color:var(--dsw-alias-label-primary);word-break:break-all;white-space:pre-wrap}',
+      '.dd-dmeta-path{align-items:center}',
+      '.dd-dmeta-copy{flex:none;border:1px solid var(--dsw-alias-border-l1);border-radius:5px;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:10px;line-height:16px;padding:1px 6px;cursor:pointer}',
+      '.dd-dmeta-copy:hover{color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-brand-primary)}',
+      '.dd-drawer-section{display:flex;flex-direction:column;gap:6px}',
+      '.dd-drawer-title{margin:0;font-size:10.5px;font-weight:600;letter-spacing:.02em;color:var(--dsw-alias-label-secondary);text-transform:uppercase}',
+      '.dd-drawer-pre{margin:0;padding:9px 10px;border-radius:6px;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:10.5px;line-height:15px;white-space:pre-wrap;word-break:break-all;max-height:340px;overflow:auto}',
+      '.dd-drawer-note{margin:0;font-size:11.5px;color:var(--dsw-alias-label-secondary)}',
+      '.dd-drawer-error{margin:0;font-size:11.5px;color:var(--dsw-alias-state-error-primary)}',
+      '.dd-dfiles{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}',
+      '.dd-dfile{display:flex;align-items:baseline;justify-content:space-between;gap:10px;padding:4px 0;border-top:1px solid var(--dsw-alias-border-l1);font-size:11px}',
+      '.dd-dfile:first-child{border-top:0}',
+      '.dd-dfile-name{min-width:0;word-break:break-all}',
+      '.dd-dfile-size{flex:none;color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums}',
       '.dd-row:hover .dd-row-copy{opacity:.8}',
       '.dd-empty{margin:0;flex:1;display:grid;place-items:center;font-size:13px;color:var(--dsw-alias-label-secondary)}',
       '.dd-foot{display:flex;align-items:center;gap:10px;flex:none;font-size:11.5px;color:var(--dsw-alias-label-secondary)}',
@@ -1316,6 +1587,7 @@ window.__ModuleLoader__.load({
       '.dd-sk-side{width:52px;flex:none}',
       '@keyframes dd-pulse{0%,100%{opacity:.55}50%{opacity:1}}',
       '@media (max-width:900px){.dd-stats{grid-template-columns:repeat(2,minmax(0,1fr))}.dd-hero-title{font-size:14px}.dd-search{width:120px}}',
+      '@media (max-width:600px){.dd-drawer{width:100%}}',
       '@media (max-width:760px){.dd-page{padding:14px 16px 10px}.dd-stat-value{font-size:22px}.dd-schip{max-width:200px}.dd-pane-title{display:none}}',
     ].join('')
 
