@@ -1,0 +1,20 @@
+# Bundle patch for the dino-dashboard plugin: one Host row that serves the
+# read-only snapshot route, plus its Client half (declared in package.json's
+# dsh.client) which renders the sidebar entry and the dashboard panel.
+#
+# Project-specific values belong in the user's profile patch, not here.
+- insert:
+    - id: dino-dashboard
+      name: '@local/dino-dashboard'
+      config:
+        # Workspace to scan. Empty uses the DSH default working directory.
+        localRoot: ''
+        # dsh-ssh host alias for remote data; empty disables remote scans.
+        remoteAlias: ''
+        # Remote roots inside that host, e.g. /data/raw, /data/runs, /data/logs.
+        remoteRoots:
+          downloadRoot: ''
+          trainingRoot: ''
+          logRoot: ''
+        # Seconds before the cached snapshot is rebuilt.
+        refreshSeconds: 20

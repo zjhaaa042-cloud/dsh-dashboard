@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Project Dashboard",
+    "description": "Automatically aggregates download, model-training and test/evaluation information from the local workspace and a remote SSH host, exposed as a sidebar dashboard entry in DSH."
+  }
+}

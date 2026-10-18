@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Project Dashboard">
+  <rect x="1" y="1" width="62" height="62" rx="14" fill="#14202b"/>
+  <rect x="13" y="14" width="38" height="24" rx="4.5" fill="none" stroke="#5eead4" stroke-width="2.4"/>
+  <path d="M18.5 32.5l7.2-8.4 5.4 5.6 4.4-6.6 8.5 9.4" fill="none" stroke="#5eead4" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M32 38v6" stroke="#5eead4" stroke-width="2.4" stroke-linecap="round"/>
+  <path d="M24 49h16" stroke="#9aa7b4" stroke-width="2.4" stroke-linecap="round"/>
+  <circle cx="49.5" cy="16.5" r="4.2" fill="#fbbf24"/>
+</svg>
