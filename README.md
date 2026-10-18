@@ -7,9 +7,9 @@ DeepSeek Harness（DSH）Web UI 侧边栏插件：在左侧新增「项目看板
 - **紧凑单面板**：顶部任务进度卡 + 任务 / 下载 / 训练 / 测试四个页签，列表在面板内滚动。
 - **任务进度**：读取工作区任务计划，结合服务器产物与运行中的进程推断每项任务的状态、进度和下一步（转换、校验、训练、评测进程会自动识别）。
 - **下载与解压**：本地下载目录与远端 raw 目录；归档显示已解压体积/文件数，解压中显示百分比和当前第几个压缩包。
-- **模型训练**：最近的训练产物、指标、GPU 实时状态；GPU 按来源分组（本地 / 远程），显示利用率、显存、温度、功耗、风扇、频率、驱动版本和占用进程。
+- **模型训练**：最近的训练产物；GPU 支持**本机 + 多台远端**（`remoteAliases`），每个来源一组，显示利用率、显存、温度、功耗、风扇、频率、驱动、占用进程，以及该机器的 CPU / 内存 / load；每张卡带一条最近约 30 个采样的利用率迷你趋势线。
 - **测试信息**：pytest 历史（每个 run 目录取最新一份日志）、评测指标和结果目录。
-- 点击条目复制完整路径；来源筛选（全部/本地/服务器）与当前页签会记住；服务端不可用时不影响本地数据。
+- 点击条目复制完整路径；支持来源筛选（全部/本地/服务器）和名称/路径搜索；当前页签与来源会记住；服务端不可用时不影响本地数据。
 
 远程数据通过 `dsh-ssh` 的 loopback exec 路由只读采集，不复制或存储 SSH 凭据；未安装 `dsh-ssh` 时插件仍可只展示本地工作区。
 
@@ -28,7 +28,9 @@ DeepSeek Harness（DSH）Web UI 侧边栏插件：在左侧新增「项目看板
 ```yaml
 config:
   localRoot: '/path/to/workspace'   # 要扫描的本地工作区
-  remoteAlias: 'my-ssh-host'        # dsh-ssh 主机别名；留空则只扫描本地
+  remoteAlias: 'my-ssh-host'        # 主 dsh-ssh 主机别名；留空则只扫描本地
+  remoteAliases:                    # 可选：额外的 GPU/主机监控目标（同样经 dsh-ssh）
+    - 'gpu-host-2'
   remoteRoots:
     downloadRoot: '/data/downloads'
     trainingRoot: '/data/runs'
@@ -36,7 +38,7 @@ config:
   refreshSeconds: 20                # 快照缓存时间
 ```
 
-可选键：`showLocal`、`showRemote`（布尔）。远程路径只在配置了 `remoteAlias` 时使用。
+`remoteAlias` 同时是项目数据（下载/训练/测试/任务）的主机来源；`remoteAliases` 里的额外主机只聚合 GPU 与主机资源。可选键：`showLocal`、`showRemote`（布尔）。
 
 仓库里的 `cordis.patch.yml` 只保留空配置；本机实际使用的路径、SSH 别名等建议写在 **profile 的 `cordis.patch.yml`** 覆盖层（同 id 覆盖），这样仓库里不会出现个人路径。
 

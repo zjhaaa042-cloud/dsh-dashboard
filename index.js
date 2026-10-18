@@ -18,6 +18,7 @@
 
 import { execFile } from 'node:child_process'
 import { readdir, readFile, stat } from 'node:fs/promises'
+import os from 'node:os'
 import { join } from 'node:path'
 
 /** Services required before the routes can mount. */
@@ -213,6 +214,45 @@ def process_label(pid, fallback):
         if name and not name.startswith('-'):
             return name[:80]
     return os.path.basename(fallback)[:80] if fallback else 'process'
+
+def system_info():
+    cpu_total = None
+    cpu_idle = None
+    try:
+        with open('/proc/stat', 'r') as handle:
+            parts = handle.readline().split()
+        values = [int(x) for x in parts[1:]]
+        if values:
+            cpu_idle = values[3] + (values[4] if len(values) > 4 else 0)
+            cpu_total = sum(values)
+    except Exception:
+        pass
+    mem_used = None
+    mem_total = None
+    try:
+        info = {}
+        with open('/proc/meminfo', 'r') as handle:
+            for line in handle:
+                key, value = line.split(':', 1)
+                info[key] = int(value.strip().split()[0])
+        mem_total = info.get('MemTotal', 0) * 1024
+        available = info.get('MemAvailable', info.get('MemFree', 0)) * 1024
+        mem_used = max(0, mem_total - available)
+    except Exception:
+        pass
+    load = None
+    try:
+        with open('/proc/loadavg', 'r') as handle:
+            load = [float(value) for value in handle.read().split()[:3]]
+    except Exception:
+        pass
+    uptime_seconds = None
+    try:
+        with open('/proc/uptime', 'r') as handle:
+            uptime_seconds = int(float(handle.read().split()[0]))
+    except Exception:
+        pass
+    return {'cpuTotal': cpu_total, 'cpuIdle': cpu_idle, 'memUsed': mem_used, 'memTotal': mem_total, 'load': load, 'uptime': uptime_seconds}
 
 def gpu_info():
     out = []
@@ -589,6 +629,7 @@ data = {
     'logs': top_entries(CFG['logRoot'], set(['.log']), 30),
     'tmux': tmux_sessions(),
     'gpu': gpu_info(),
+    'system': system_info(),
 }
 print('@@DINO@@' + json.dumps(data, ensure_ascii=False))
 `
@@ -609,9 +650,21 @@ function number(value, fallback, min, max) {
 function normalizeConfig(config) {
   const raw = config !== null && typeof config === 'object' ? config : {}
   const roots = raw.remoteRoots !== null && typeof raw.remoteRoots === 'object' ? raw.remoteRoots : {}
+  const aliases = []
+  const pushAlias = (value) => {
+    if (typeof value !== 'string') return
+    const alias = value.trim()
+    if (alias !== '' && !aliases.includes(alias)) aliases.push(alias)
+  }
+  pushAlias(raw.remoteAlias)
+  const extraAliases = Array.isArray(raw.remoteAliases)
+    ? raw.remoteAliases
+    : typeof raw.remoteAliases === 'string' ? raw.remoteAliases.split(',') : []
+  for (const value of extraAliases) pushAlias(value)
   return {
     localRoot: text(raw.localRoot, DEFAULT_LOCAL_ROOT),
-    remoteAlias: typeof raw.remoteAlias === 'string' ? raw.remoteAlias.trim() : DEFAULT_REMOTE_ALIAS,
+    remoteAlias: aliases.length > 0 ? aliases[0] : DEFAULT_REMOTE_ALIAS,
+    remoteAliases: aliases,
     refreshSeconds: number(raw.refreshSeconds, 20, 5, 300),
     showLocal: raw.showLocal !== false,
     showRemote: raw.showRemote !== false,
@@ -765,6 +818,84 @@ async function readLocalGpu() {
     })
   }
   return { available: true, error: null, gpus }
+}
+
+/** Previous local CPU counters, for a delta-based utilization reading. */
+let lastLocalCpu = null
+/** Previous remote CPU counters keyed by SSH alias. */
+const remoteCpuState = new Map()
+/** Rolling per-GPU utilization/memory history (newest last, ~30 samples). */
+const gpuHistory = new Map()
+
+/** Read the local host's CPU, memory and uptime. */
+function readLocalSystem() {
+  let idle = 0
+  let total = 0
+  for (const core of os.cpus()) {
+    for (const key of ['user', 'nice', 'sys', 'irq']) total += core.times[key] ?? 0
+    idle += core.times.idle ?? 0
+  }
+  total += idle
+  let cpu = null
+  if (lastLocalCpu !== null && total > lastLocalCpu.total) {
+    const totalDelta = total - lastLocalCpu.total
+    const idleDelta = idle - lastLocalCpu.idle
+    cpu = Math.round(Math.max(0, Math.min(100, (1 - idleDelta / totalDelta) * 100)) * 10) / 10
+  }
+  lastLocalCpu = { total, idle }
+  const memTotal = os.totalmem()
+  return {
+    cpu,
+    memUsed: memTotal - os.freemem(),
+    memTotal,
+    load: null,
+    uptime: os.uptime(),
+  }
+}
+
+/** Convert raw remote /proc counters into a utilization figure. */
+function readRemoteSystem(payload, alias) {
+  const raw = payload !== null && typeof payload === 'object' && payload.system !== null && typeof payload.system === 'object' ? payload.system : {}
+  let cpu = null
+  if (typeof raw.cpuTotal === 'number' && typeof raw.cpuIdle === 'number') {
+    const previous = remoteCpuState.get(alias)
+    if (previous !== undefined && raw.cpuTotal > previous.total) {
+      const totalDelta = raw.cpuTotal - previous.total
+      const idleDelta = raw.cpuIdle - previous.idle
+      cpu = Math.round(Math.max(0, Math.min(100, (1 - idleDelta / totalDelta) * 100)) * 10) / 10
+    }
+    remoteCpuState.set(alias, { total: raw.cpuTotal, idle: raw.cpuIdle })
+  }
+  return {
+    cpu,
+    memUsed: typeof raw.memUsed === 'number' ? raw.memUsed : null,
+    memTotal: typeof raw.memTotal === 'number' ? raw.memTotal : null,
+    load: Array.isArray(raw.load) ? raw.load : null,
+    uptime: typeof raw.uptime === 'number' ? raw.uptime : null,
+  }
+}
+
+/** Append one GPU sample to its rolling history and return a copy. */
+function pushGpuHistory(key, card) {
+  const entry = gpuHistory.get(key) ?? { util: [], mem: [] }
+  if (typeof card.util === 'number') {
+    entry.util.push(Math.round(card.util))
+    if (entry.util.length > 30) entry.util.shift()
+  }
+  if (typeof card.memUtil === 'number') {
+    entry.mem.push(Math.round(card.memUtil))
+    if (entry.mem.length > 30) entry.mem.shift()
+  }
+  gpuHistory.set(key, entry)
+  return { util: entry.util.slice(), mem: entry.mem.slice() }
+}
+
+/** Attach history to a GPU list and tag it with a history namespace. */
+function decorateGpus(gpus, namespace) {
+  return gpus.map((card, index) => ({
+    ...card,
+    history: pushGpuHistory(`${namespace}:${card.index ?? index}`, card),
+  }))
 }
 
 /** Whether a file name looks like an in-flight download. */
@@ -1595,7 +1726,7 @@ async function buildSnapshot(webServer, options) {
     refreshMs: options.refreshSeconds * 1000,
     local: { enabled: options.showLocal, root: options.localRoot, ok: false, error: null },
     remote: {
-      enabled: options.showRemote && options.remoteAlias !== '' && options.remoteDownloadRoot !== '',
+      enabled: options.showRemote && Array.isArray(options.remoteAliases) && options.remoteAliases.length > 0,
       alias: options.remoteAlias,
       ok: false,
       error: null,
@@ -1605,7 +1736,8 @@ async function buildSnapshot(webServer, options) {
     training: { items: [], count: 0, bytes: 0, running: 0, passed: 0, failed: 0 },
     tests: { items: [], count: 0, bytes: 0, running: 0, passed: 0, failed: 0 },
     gpu: {
-      local: { available: false, error: null, gpus: [] },
+      local: { available: false, error: null, gpus: [], system: null },
+      remotes: [],
       remote: { available: false, error: null, gpus: [] },
     },
     tasks: null,
@@ -1623,23 +1755,51 @@ async function buildSnapshot(webServer, options) {
 
   let remote = null
   let remotePayload = null
+  const remotes = []
   if (snapshot.remote.enabled) {
-    try {
-      remotePayload = await scanRemote(webServer.getOrigin(), options)
-      remote = mapRemote(remotePayload, maxItems, options)
-      snapshot.remote.ok = true
-      snapshot.remote.host = remote.host
-    } catch (error) {
-      snapshot.remote.error = error instanceof Error ? error.message : String(error)
+    for (const alias of options.remoteAliases) {
+      const aliasOptions = { ...options, remoteAlias: alias }
+      try {
+        const payload = await scanRemote(webServer.getOrigin(), aliasOptions)
+        remotes.push({
+          alias,
+          host: typeof payload.host === 'string' ? payload.host : '',
+          primary: alias === options.remoteAlias,
+          available: true,
+          error: null,
+          gpus: decorateGpus(Array.isArray(payload.gpu) ? payload.gpu : [], `remote:${alias}`),
+          system: readRemoteSystem(payload, alias),
+        })
+        if (alias === options.remoteAlias) {
+          remotePayload = payload
+          remote = mapRemote(payload, maxItems, aliasOptions)
+          snapshot.remote.ok = true
+          snapshot.remote.host = remote.host
+        }
+      } catch (error) {
+        remotes.push({
+          alias,
+          host: '',
+          primary: alias === options.remoteAlias,
+          available: false,
+          error: error instanceof Error ? error.message : String(error),
+          gpus: [],
+          system: null,
+        })
+        if (alias === options.remoteAlias) snapshot.remote.error = error instanceof Error ? error.message : String(error)
+      }
     }
   }
 
+  const localGpu = options.showLocal ? await readLocalGpu() : { available: false, error: 'local scan disabled', gpus: [] }
+  const primaryRemote = remotes.find(entry => entry.primary === true)
   snapshot.gpu = {
-    local: options.showLocal ? await readLocalGpu() : { available: false, error: 'local scan disabled', gpus: [] },
+    local: { ...localGpu, gpus: decorateGpus(localGpu.gpus, 'local'), system: options.showLocal ? readLocalSystem() : null },
+    remotes,
     remote: {
       available: snapshot.remote.ok,
       error: snapshot.remote.error,
-      gpus: remote?.gpu ?? [],
+      gpus: primaryRemote?.gpus ?? [],
     },
   }
   snapshot.tasks = buildTasks(await scanTaskEvidence(options.localRoot), remotePayload)
@@ -1696,7 +1856,8 @@ export function apply(ctx, config) {
           training: { items: [], count: 0, bytes: 0, running: 0, passed: 0, failed: 0 },
           tests: { items: [], count: 0, bytes: 0, running: 0, passed: 0, failed: 0 },
           gpu: {
-            local: { available: false, error: null, gpus: [] },
+            local: { available: false, error: null, gpus: [], system: null },
+            remotes: [],
             remote: { available: false, error: null, gpus: [] },
           },
           tasks: null,

@@ -54,11 +54,13 @@ window.__ModuleLoader__.load({
       'filter.all': '全部',
       'filter.local': '本地',
       'filter.remote': '服务器',
+      'filter.search': '搜索名称 / 路径',
       'empty.downloads': '暂无下载记录',
       'empty.training': '暂无训练记录',
       'empty.tests': '暂无测试记录',
       'empty.tasks': '暂无任务计划',
       'empty.filtered': '当前筛选下没有记录',
+      'empty.search': '没有匹配的记录',
       'status.running': '进行中',
       'status.passed': '通过',
       'status.failed': '失败',
@@ -102,6 +104,10 @@ window.__ModuleLoader__.load({
       'gpu.mem': '{used}/{total} GB',
       'gpu.noLocal': '本地未检测到 GPU（nvidia-smi 不可用）',
       'gpu.noRemote': '服务器未返回 GPU 信息',
+      'gpu.noGpu': '未检测到 GPU',
+      'gpu.system': 'CPU {cpu}% · 内存 {used}/{total} GB',
+      'gpu.memOnly': '内存 {used}/{total} GB',
+      'gpu.load': 'load {load}',
       'gpu.driver': '驱动 {v}',
       'gpu.fan': '风扇 {n}%',
       'gpu.memUtil': '显存 {n}%',
@@ -146,11 +152,13 @@ window.__ModuleLoader__.load({
       'filter.all': 'All',
       'filter.local': 'Local',
       'filter.remote': 'Server',
+      'filter.search': 'Search name / path',
       'empty.downloads': 'No download records yet',
       'empty.training': 'No training records yet',
       'empty.tests': 'No test records yet',
       'empty.tasks': 'No task plan yet',
       'empty.filtered': 'Nothing matches this filter',
+      'empty.search': 'Nothing matches this search',
       'status.running': 'Running',
       'status.passed': 'Passed',
       'status.failed': 'Failed',
@@ -194,6 +202,10 @@ window.__ModuleLoader__.load({
       'gpu.mem': '{used}/{total} GB',
       'gpu.noLocal': 'No local GPU detected (nvidia-smi unavailable)',
       'gpu.noRemote': 'No GPU information from the server',
+      'gpu.noGpu': 'No GPU detected',
+      'gpu.system': 'CPU {cpu}% · mem {used}/{total} GB',
+      'gpu.memOnly': 'mem {used}/{total} GB',
+      'gpu.load': 'load {load}',
       'gpu.driver': 'driver {v}',
       'gpu.fan': 'fan {n}%',
       'gpu.memUtil': 'mem {n}%',
@@ -557,7 +569,40 @@ window.__ModuleLoader__.load({
       ])
     }
 
-    /** One GPU card: utilization, memory, temperature, power, fan, clock and processes. */
+    /** Compact CPU / memory / load summary for one machine. */
+    function formatSystem(system, t) {
+      if (system === null || system === undefined) return ''
+      const parts = []
+      if (typeof system.cpu === 'number') parts.push(fmt(t, 'gpu.system', {
+        cpu: Math.round(system.cpu),
+        used: typeof system.memUsed === 'number' ? (system.memUsed / 1024 ** 3).toFixed(1) : '—',
+        total: typeof system.memTotal === 'number' ? Math.round(system.memTotal / 1024 ** 3) : '—',
+      }))
+      else if (typeof system.memUsed === 'number' && typeof system.memTotal === 'number') {
+        parts.push(fmt(t, 'gpu.memOnly', { used: (system.memUsed / 1024 ** 3).toFixed(1), total: Math.round(system.memTotal / 1024 ** 3) }))
+      }
+      if (Array.isArray(system.load) && system.load.some((value) => typeof value === 'number' && value > 0)) {
+        parts.push(fmt(t, 'gpu.load', { load: Number(system.load[0]).toFixed(2) }))
+      }
+      return parts.join(' · ')
+    }
+
+    /** Tiny utilization sparkline from the Host's rolling history. */
+    function Sparkline({ values }) {
+      if (!Array.isArray(values) || values.length < 2) return null
+      const width = 120
+      const height = 18
+      const points = values.map((value, index) => {
+        const x = (index / (values.length - 1)) * width
+        const y = height - (Math.max(0, Math.min(100, value)) / 100) * height
+        return `${x.toFixed(1)},${y.toFixed(1)}`
+      }).join(' ')
+      return h('svg', { viewBox: `0 0 ${width} ${height}`, width: '100%', height: 16, preserveAspectRatio: 'none', 'aria-hidden': true }, [
+        h('polyline', { key: 'line', points, fill: 'none', stroke: 'currentColor', strokeWidth: 1.2, strokeLinejoin: 'round', strokeLinecap: 'round' }),
+      ])
+    }
+
+    /** One GPU card: utilization, history, memory, temperature, power, fan, clock and processes. */
     function GpuCard({ card, t }) {
       const util = typeof card.util === 'number' ? Math.max(0, Math.min(100, card.util)) : null
       const used = typeof card.memUsed === 'number' ? Math.round((card.memUsed / 1024) * 10) / 10 : null
@@ -577,12 +622,14 @@ window.__ModuleLoader__.load({
         return `${label} ${size}`
       }
       const appTitle = apps.map((app) => `${typeof app.pid === 'string' && app.pid !== '' ? `PID ${app.pid} · ` : ''}${app.name} · ${app.memory} MiB`).join('\n')
+      const history = card.history !== null && card.history !== undefined && Array.isArray(card.history.util) ? card.history.util : []
       return h('span', { className: 'dd-gpu-card' }, [
         h('span', { key: 'head', className: 'dd-gpu-head' }, [
           h('span', { key: 'name', className: 'dd-gpu-name' }, `${t('gpu.label')}${card.index ?? ''} · ${card.name ?? ''}`),
           h('span', { key: 'util', className: 'dd-gpu-util' }, util === null ? '—' : `${Math.round(util)}%`),
         ]),
         h('span', { key: 'bar', className: 'dd-gpu-bar' }, h('span', { className: 'dd-gpu-fill', style: { width: `${util ?? 0}%` } })),
+        history.length < 2 ? null : h('span', { key: 'spark', className: 'dd-gpu-spark' }, h(Sparkline, { values: history })),
         h('span', { key: 'detail', className: 'dd-gpu-detail' }, details.join(' · ')),
         apps.length === 0
           ? null
@@ -590,7 +637,7 @@ window.__ModuleLoader__.load({
       ])
     }
 
-    /** GPU strip: one group for the local machine and/or the remote server. */
+    /** GPU strip: local + one group per configured remote host. */
     function GpuStrip({ groups, t }) {
       return h('div', { className: 'dd-gpu' }, groups.map((group) => h('div', { key: group.key, className: 'dd-gpu-group' }, [
         h('div', { key: 'head', className: 'dd-gpu-group-head' }, [
@@ -598,6 +645,9 @@ window.__ModuleLoader__.load({
           group.gpus.length > 0 && typeof group.gpus[0].driver === 'string' && group.gpus[0].driver !== ''
             ? h('span', { key: 'driver', className: 'dd-gpu-driver' }, fmt(t, 'gpu.driver', { v: group.gpus[0].driver }))
             : null,
+          formatSystem(group.system, t) === ''
+            ? null
+            : h('span', { key: 'system', className: 'dd-gpu-sys' }, formatSystem(group.system, t)),
         ]),
         group.gpus.length === 0
           ? h('span', { key: 'empty', className: 'dd-gpu-empty' }, group.message)
@@ -672,6 +722,7 @@ window.__ModuleLoader__.load({
         return stored === 'local' || stored === 'remote' ? stored : 'all'
       })
       const [toast, setToast] = React.useState(null)
+      const [query, setQuery] = React.useState('')
       const alive = React.useRef(true)
       const busy = React.useRef(false)
 
@@ -745,24 +796,44 @@ window.__ModuleLoader__.load({
       const activeSection = data === null ? null : isTasks ? { items: data.tasks?.items ?? [] } : data[activeTab]
       const all = Array.isArray(activeSection?.items) ? activeSection.items : []
       const items = isTasks || source === 'all' ? all : all.filter((entry) => entry.source === source)
+      const needle = query.trim().toLowerCase()
+      const visibleItems = needle === '' ? items : items.filter((entry) => `${entry.name} ${entry.detail ?? ''} ${entry.path ?? ''}`.toLowerCase().includes(needle))
+      const noMatches = needle !== '' && items.length > 0 && visibleItems.length === 0
       const local = data?.local
       const remote = data?.remote
       const remoteEnabled = remote !== undefined && remote !== null && remote.enabled === true
       const localTone = local === undefined || local === null ? 'off' : local.ok === true ? 'ok' : 'bad'
       const remoteTone = remoteEnabled === false ? 'off' : remote?.ok === true ? 'ok' : 'bad'
       const gpuData = data?.gpu ?? null
-      const localGpus = Array.isArray(gpuData?.local?.gpus) ? gpuData.local.gpus : []
-      const remoteGpus = Array.isArray(gpuData?.remote?.gpus) ? gpuData.remote.gpus : []
+      const localInfo = gpuData?.local ?? null
+      const localGpus = Array.isArray(localInfo?.gpus) ? localInfo.gpus : []
+      const remoteInfos = Array.isArray(gpuData?.remotes)
+        ? gpuData.remotes
+        : gpuData?.remote
+          ? [{ alias: remote?.alias ?? '', host: remote?.host ?? '', available: gpuData.remote.available, gpus: gpuData.remote.gpus ?? [], system: null }]
+          : []
+      const remoteGpus = remoteInfos.flatMap((entry) => (Array.isArray(entry.gpus) ? entry.gpus : []))
       const statGpus = source === 'local' ? localGpus : remoteGpus
       const gpuGroups = []
       if (gpuData !== null) {
-        if (source !== 'remote') {
-          if (localGpus.length > 0) gpuGroups.push({ key: 'local', label: t('source.local'), gpus: localGpus })
-          else if (gpuData.local?.available === false) gpuGroups.push({ key: 'local', label: t('source.local'), gpus: [], message: gpuData.local.error === 'local scan disabled' ? t('state.off') : t('gpu.noLocal') })
+        if (source !== 'remote' && localInfo !== null) {
+          if (localGpus.length > 0) {
+            gpuGroups.push({ key: 'local', label: t('source.local'), gpus: localGpus, system: localInfo.system })
+          } else if (localInfo.available === false) {
+            gpuGroups.push({ key: 'local', label: t('source.local'), gpus: [], system: localInfo.system, message: localInfo.error === 'local scan disabled' ? t('state.off') : t('gpu.noLocal') })
+          }
         }
         if (source !== 'local' && remoteEnabled) {
-          if (remoteGpus.length > 0) gpuGroups.push({ key: 'remote', label: t('source.remote'), gpus: remoteGpus })
-          else if (gpuData.remote?.available === false) gpuGroups.push({ key: 'remote', label: t('source.remote'), gpus: [], message: t('gpu.noRemote') })
+          for (const entry of remoteInfos) {
+            const label = entry.host !== '' ? `${entry.alias} · ${entry.host}` : entry.alias
+            gpuGroups.push({
+              key: `remote:${entry.alias}`,
+              label,
+              gpus: Array.isArray(entry.gpus) ? entry.gpus : [],
+              system: entry.system,
+              message: entry.available === false ? t('gpu.noRemote') : t('gpu.noGpu'),
+            })
+          }
         }
       }
 
@@ -894,9 +965,18 @@ window.__ModuleLoader__.load({
               h('span', { key: 'count', className: 'dd-pane-count' }, isTasks
                 ? fmt(t, 'task.panelCount', { done: data?.tasks?.done ?? 0, total: data?.tasks?.total ?? 0 })
                 : source === 'all'
-                  ? fmt(t, 'summary.items', { n: all.length })
-                  : fmt(t, 'count.filtered', { shown: items.length, total: all.length })),
+                  ? fmt(t, 'summary.items', { n: visibleItems.length })
+                  : fmt(t, 'count.filtered', { shown: visibleItems.length, total: all.length })),
               h('span', { key: 'spacer', className: 'dd-spacer' }),
+              h('input', {
+                key: 'search',
+                className: 'dd-search',
+                type: 'search',
+                value: query,
+                placeholder: t('filter.search'),
+                'aria-label': t('filter.search'),
+                onChange: (event) => setQuery(event.target.value),
+              }),
               isTasks
                 ? null
                 : h('div', { key: 'seg', className: 'dd-seg', role: 'group', 'aria-label': t('filter.label') }, [
@@ -908,9 +988,9 @@ window.__ModuleLoader__.load({
             activeTab === 'training' && gpuGroups.length > 0 ? h(GpuStrip, { key: 'gpu', groups: gpuGroups, t }) : null,
             data === null && state.error === null
               ? h(Skeleton, { key: 'skeleton' })
-              : items.length === 0
-                ? h('p', { key: 'empty', className: 'dd-empty' }, all.length > 0 ? t('empty.filtered') : t(`empty.${activeTab}`))
-                : h('ul', { key: 'list', className: 'dd-list' }, items.map((entry) => h(Row, { key: entry.id, item: entry, t, onCopy: copy }))),
+              : visibleItems.length === 0
+                ? h('p', { key: 'empty', className: 'dd-empty' }, noMatches ? t('empty.search') : all.length > 0 ? t('empty.filtered') : t(`empty.${activeTab}`))
+                : h('ul', { key: 'list', className: 'dd-list' }, visibleItems.map((entry) => h(Row, { key: entry.id, item: entry, t, onCopy: copy }))),
           ]),
           h('footer', { key: 'foot', className: 'dd-foot' }, [
             h('span', { key: 'hint' }, t('foot.hint')),
@@ -1019,6 +1099,9 @@ window.__ModuleLoader__.load({
       '.dd-stat-meta{width:100%;font-size:12px;color:var(--dsw-alias-label-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-height:17px}',
       '.dd-panel{flex:1;min-height:160px;display:flex;flex-direction:column;border:1px solid var(--dsw-alias-border-l1);border-radius:12px;background:var(--dsw-alias-bg-layer-1);overflow:hidden}',
       '.dd-toolbar{display:flex;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);flex:none}',
+      '.dd-search{width:160px;min-width:90px;border:1px solid var(--dsw-alias-border-l1);border-radius:6px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit;font-size:11.5px;line-height:18px;padding:2px 8px;outline:none}',
+      '.dd-search:focus{border-color:var(--dsw-alias-brand-primary)}',
+      '.dd-search::placeholder{color:var(--dsw-alias-label-secondary)}',
       '.dd-pane-title{font-size:14px;font-weight:600}',
       '.dd-pane-count{font-size:12px;color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums}',
       '.dd-seg{display:flex;gap:2px;padding:2px;border-radius:7px;background:var(--dsw-alias-bg-base)}',
@@ -1028,7 +1111,8 @@ window.__ModuleLoader__.load({
       '.dd-seg-active{background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-weight:500}',
       '.dd-gpu{display:flex;flex-direction:column;gap:7px;padding:8px 14px;border-bottom:1px solid var(--dsw-alias-border-l1);flex:none}',
       '.dd-gpu-group{display:flex;flex-direction:column;gap:5px}',
-      '.dd-gpu-group-head{display:flex;align-items:baseline;gap:8px}',
+      '.dd-gpu-group-head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}',
+      '.dd-gpu-sys{font-size:10.5px;color:var(--dsw-alias-label-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
       '.dd-gpu-group-label{font-size:11.5px;font-weight:500;color:var(--dsw-alias-label-secondary)}',
       '.dd-gpu-driver{font-size:10.5px;color:var(--dsw-alias-label-secondary)}',
       '.dd-gpu-cards{display:flex;gap:8px;flex-wrap:wrap}',
@@ -1039,6 +1123,7 @@ window.__ModuleLoader__.load({
       '.dd-gpu-bar{height:4px;border-radius:3px;background:var(--dsw-alias-bg-base);overflow:hidden}',
       '.dd-gpu-fill{display:block;height:100%;border-radius:3px;background:var(--dsw-alias-brand-primary);transition:width .4s ease}',
       '.dd-gpu-detail{font-size:10.5px;color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+      '.dd-gpu-spark{display:block;height:16px;color:var(--dsw-alias-brand-primary);opacity:.8}',
       '.dd-gpu-apps{font-size:10.5px;color:var(--dsw-alias-label-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
       '.dd-gpu-empty{font-size:11px;color:var(--dsw-alias-label-secondary)}',
       '.dd-list{list-style:none;margin:0;padding:0;flex:1;min-height:0;overflow:auto}',
@@ -1079,7 +1164,7 @@ window.__ModuleLoader__.load({
       '.dd-sk-line-short{width:34%}',
       '.dd-sk-side{width:52px;flex:none}',
       '@keyframes dd-pulse{0%,100%{opacity:.55}50%{opacity:1}}',
-      '@media (max-width:900px){.dd-stats{grid-template-columns:repeat(2,minmax(0,1fr))}.dd-hero-title{font-size:14px}}',
+      '@media (max-width:900px){.dd-stats{grid-template-columns:repeat(2,minmax(0,1fr))}.dd-hero-title{font-size:14px}.dd-search{width:120px}}',
       '@media (max-width:760px){.dd-page{padding:14px 16px 10px}.dd-stat-value{font-size:22px}.dd-schip{max-width:200px}.dd-pane-title{display:none}}',
     ].join('')
 
