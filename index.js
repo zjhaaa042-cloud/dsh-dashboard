@@ -70,7 +70,7 @@ const LIMITS = {
  * is a pure, read-only filesystem reporter.
  */
 const PY_PROBE = String.raw`
-import json, os, re, subprocess, time
+import json, os, re, shlex, subprocess, time
 
 CFG = __CFG__
 
@@ -253,6 +253,47 @@ def system_info():
     except Exception:
         pass
     return {'cpuTotal': cpu_total, 'cpuIdle': cpu_idle, 'memUsed': mem_used, 'memTotal': mem_total, 'load': load, 'uptime': uptime_seconds}
+
+def transfer_direction(args):
+    try:
+        parts = shlex.split(args)
+    except Exception:
+        parts = args.split()
+    if not parts:
+        return ('unknown', '', '')
+    program = os.path.basename(parts[0]).lower()
+    rest = [value for value in parts[1:] if not value.startswith('-')]
+    remote = [value for value in rest if ':' in value and not value.startswith('/')]
+    if program.startswith('sftp'):
+        return ('session', remote[0] if remote else '', '')
+    if len(remote) >= 2:
+        return ('remote', rest[0] if rest else '', rest[-1] if rest else '')
+    if remote:
+        if rest and rest[0] == remote[0]:
+            return ('download', remote[0], rest[-1] if len(rest) > 1 else '')
+        return ('upload', rest[0] if rest else '', remote[0])
+    return ('unknown', rest[0] if rest else '', rest[-1] if len(rest) > 1 else '')
+
+def transfer_processes():
+    out = []
+    for line in sh("ps -eo pid=,etime=,args= 2>/dev/null").splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
+        pid, etime, args = parts
+        program = os.path.basename(args.split()[0]).lower() if args.split() else ''
+        if program not in ('scp', 'rsync', 'sftp', 'rclone'):
+            continue
+        direction, source, dest = transfer_direction(args)
+        out.append({
+            'pid': pid,
+            'etime': etime,
+            'args': args[:300],
+            'direction': direction,
+            'source': source[:200],
+            'dest': dest[:200],
+        })
+    return out
 
 def gpu_info():
     out = []
@@ -630,6 +671,7 @@ data = {
     'tmux': tmux_sessions(),
     'gpu': gpu_info(),
     'system': system_info(),
+    'transfers': transfer_processes(),
 }
 print('@@DINO@@' + json.dumps(data, ensure_ascii=False))
 `
@@ -826,6 +868,14 @@ let lastLocalCpu = null
 const remoteCpuState = new Map()
 /** Rolling per-GPU utilization/memory history (newest last, ~30 samples). */
 const gpuHistory = new Map()
+/** dsh-ssh staging files currently seen, keyed by staging file name. */
+const stagingTransfers = new Map()
+/** Recently finished staging transfers. */
+const completedTransfers = []
+/** Latest staging snapshot, refreshed by a 2 s background timer. */
+let latestStaging = null
+/** Latest remote transfer processes seen during a full snapshot. */
+let latestRemoteTransfers = []
 
 /** Read the local host's CPU, memory and uptime. */
 function readLocalSystem() {
@@ -896,6 +946,62 @@ function decorateGpus(gpus, namespace) {
     ...card,
     history: pushGpuHistory(`${namespace}:${card.index ?? index}`, card),
   }))
+}
+
+/**
+ * Read the dsh-ssh transfer staging directory. File names carry the direction
+ * (`upload-*` = local -> remote, `download-*` = remote -> local); a growing file
+ * is still receiving bytes, a stable one is being sent onward.
+ */
+async function readStagingTransfers() {
+  const dir = join(os.tmpdir(), 'dsh-ssh-uploads')
+  const entries = await listSafe(dir, 100)
+  const now = Date.now()
+  const active = []
+  const seen = new Set()
+  for (const entry of entries) {
+    if (!entry.isFile() || !/^(upload|download)-/.test(entry.name)) continue
+    const info = await statSafe(join(dir, entry.name))
+    if (info === null) continue
+    const direction = entry.name.startsWith('upload-') ? 'upload' : 'download'
+    let record = stagingTransfers.get(entry.name)
+    if (record === undefined) {
+      record = { direction, startedAt: now, lastSize: info.size, lastAt: now, rate: null }
+      stagingTransfers.set(entry.name, record)
+    }
+    const elapsed = Math.max(1, now - record.lastAt)
+    const delta = info.size - record.lastSize
+    const rate = delta >= 0 ? (delta / elapsed) * 1000 : null
+    const phase = delta > 0 ? 'receiving' : 'sending'
+    if (typeof rate === 'number' && rate > 0) record.rate = rate
+    record.lastSize = info.size
+    record.lastAt = now
+    active.push({
+      name: entry.name,
+      direction,
+      phase,
+      size: info.size,
+      rate: record.rate,
+      startedAt: record.startedAt,
+      elapsedMs: now - record.startedAt,
+      mtime: now,
+    })
+    seen.add(entry.name)
+  }
+  for (const [name, record] of stagingTransfers) {
+    if (seen.has(name)) continue
+    completedTransfers.unshift({
+      name,
+      direction: record.direction,
+      bytes: record.lastSize,
+      startedAt: record.startedAt,
+      endedAt: now,
+      durationMs: now - record.startedAt,
+    })
+    stagingTransfers.delete(name)
+  }
+  while (completedTransfers.length > 12) completedTransfers.pop()
+  return { dir, active, completed: completedTransfers.slice() }
 }
 
 /** Whether a file name looks like an in-flight download. */
@@ -1713,6 +1819,68 @@ function summarize(items) {
   return summary
 }
 
+/** Build the transfer tab payload from a staging snapshot and remote processes. */
+function buildTransferItems(staging, remoteTransfers) {
+  const stagingActive = staging.active.map(entry => item({
+    id: `transfer:staging:${entry.name}`,
+    kind: 'transfer',
+    name: entry.direction === 'upload' ? 'DSH 上传' : 'DSH 下载',
+    status: 'running',
+    source: 'local',
+    size: entry.size,
+    mtime: entry.mtime,
+    transfer: {
+      direction: entry.direction,
+      phase: entry.phase,
+      rate: entry.rate,
+      elapsedMs: entry.elapsedMs,
+      file: entry.name,
+    },
+  }))
+  const stagingCompleted = staging.completed.map(entry => item({
+    id: `transfer:done:${entry.name}:${entry.endedAt}`,
+    kind: 'transfer',
+    name: entry.direction === 'upload' ? 'DSH 上传' : 'DSH 下载',
+    status: 'done',
+    source: 'local',
+    size: entry.bytes,
+    mtime: entry.endedAt,
+    transfer: {
+      direction: entry.direction,
+      phase: 'done',
+      durationMs: entry.durationMs,
+      file: entry.name,
+    },
+  }))
+  const remoteTransferItems = remoteTransfers.map(process => {
+    const command = String(process.args ?? '')
+    const program = command.trim().split(/\s+/)[0]?.split(/[\\/]/).pop() ?? 'transfer'
+    return item({
+      id: `transfer:remote:${process.alias}:${process.pid}`,
+      kind: 'transfer',
+      name: program,
+      status: 'running',
+      source: 'remote',
+      mtime: Date.now(),
+      transfer: {
+        direction: process.direction ?? 'unknown',
+        phase: 'process',
+        sourcePath: process.source ?? '',
+        destPath: process.dest ?? '',
+        alias: process.alias,
+        pid: process.pid,
+        etime: process.etime ?? '',
+        command,
+      },
+    })
+  })
+  return {
+    active: [...stagingActive, ...remoteTransferItems],
+    completed: stagingCompleted,
+    stagingDir: staging.dir,
+  }
+}
+
 /**
  * Build one full snapshot. Local and remote failures are reported per side so a
  * down server never hides the local project state (and the reverse).
@@ -1735,6 +1903,7 @@ async function buildSnapshot(webServer, options) {
     downloads: { items: [], count: 0, bytes: 0, running: 0, passed: 0, failed: 0 },
     training: { items: [], count: 0, bytes: 0, running: 0, passed: 0, failed: 0 },
     tests: { items: [], count: 0, bytes: 0, running: 0, passed: 0, failed: 0 },
+    transfers: { active: [], completed: [], stagingDir: '' },
     gpu: {
       local: { available: false, error: null, gpus: [], system: null },
       remotes: [],
@@ -1756,6 +1925,7 @@ async function buildSnapshot(webServer, options) {
   let remote = null
   let remotePayload = null
   const remotes = []
+  const remoteTransfers = []
   if (snapshot.remote.enabled) {
     for (const alias of options.remoteAliases) {
       const aliasOptions = { ...options, remoteAlias: alias }
@@ -1770,6 +1940,9 @@ async function buildSnapshot(webServer, options) {
           gpus: decorateGpus(Array.isArray(payload.gpu) ? payload.gpu : [], `remote:${alias}`),
           system: readRemoteSystem(payload, alias),
         })
+        for (const transfer of Array.isArray(payload.transfers) ? payload.transfers : []) {
+          remoteTransfers.push({ ...transfer, alias })
+        }
         if (alias === options.remoteAlias) {
           remotePayload = payload
           remote = mapRemote(payload, maxItems, aliasOptions)
@@ -1803,6 +1976,10 @@ async function buildSnapshot(webServer, options) {
     },
   }
   snapshot.tasks = buildTasks(await scanTaskEvidence(options.localRoot), remotePayload)
+
+  latestRemoteTransfers = remoteTransfers
+  if (latestStaging === null) latestStaging = await readStagingTransfers()
+  snapshot.transfers = buildTransferItems(latestStaging, remoteTransfers)
 
   const downloads = newest([...local.downloads, ...(remote?.downloads ?? [])], maxItems)
   const training = selectTraining([...local.training, ...(remote?.training ?? [])], maxItems)
@@ -1855,6 +2032,7 @@ export function apply(ctx, config) {
           downloads: { items: [], count: 0, bytes: 0, running: 0, passed: 0, failed: 0 },
           training: { items: [], count: 0, bytes: 0, running: 0, passed: 0, failed: 0 },
           tests: { items: [], count: 0, bytes: 0, running: 0, passed: 0, failed: 0 },
+          transfers: { active: [], completed: [], stagingDir: '' },
           gpu: {
             local: { available: false, error: null, gpus: [], system: null },
             remotes: [],
@@ -1899,8 +2077,44 @@ export function apply(ctx, config) {
     },
   }
 
+  const transfers = {
+    kind: 'exact',
+    path: '/api/dino-dashboard/transfers',
+    handler: async (request, response) => {
+      if (!isLoopbackRequest(request)) return writeJson(response, 403, { error: 'forbidden: loopback-only' })
+      if (request.method !== 'GET') return writeJson(response, 405, { error: 'method not allowed' })
+      try {
+        if (latestStaging === null) latestStaging = await readStagingTransfers()
+        return writeJson(response, 200, buildTransferItems(latestStaging, latestRemoteTransfers))
+      } catch (error) {
+        return writeJson(response, 500, { error: error instanceof Error ? error.message : String(error) })
+      }
+    },
+  }
+
+  const clearTransfers = {
+    kind: 'exact',
+    path: '/api/dino-dashboard/transfers/clear',
+    handler: async (request, response) => {
+      if (!isLoopbackRequest(request)) return writeJson(response, 403, { error: 'forbidden: loopback-only' })
+      if (request.method !== 'POST') return writeJson(response, 405, { error: 'method not allowed' })
+      completedTransfers.length = 0
+      if (latestStaging === null) latestStaging = await readStagingTransfers()
+      return writeJson(response, 200, buildTransferItems(latestStaging, latestRemoteTransfers))
+    },
+  }
+
+  const refreshStaging = () => {
+    readStagingTransfers().then(value => { latestStaging = value }).catch(() => {})
+  }
+  refreshStaging()
   ctx.effect(() => {
-    const disposers = [state, force].map(route => ctx.webServer.register(route))
+    const timer = setInterval(refreshStaging, 2000)
+    return () => clearInterval(timer)
+  }, 'dino-dashboard: transfer tracker')
+
+  ctx.effect(() => {
+    const disposers = [state, force, transfers, clearTransfers].map(route => ctx.webServer.register(route))
     return () => {
       for (const dispose of disposers) dispose()
     }

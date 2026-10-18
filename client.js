@@ -18,7 +18,7 @@ window.__ModuleLoader__.load({
     const POLL_MS = 15000
     const STORE_TAB = 'dino-dashboard:tab:v2'
     const STORE_SOURCE = 'dino-dashboard:source'
-    const TABS = ['tasks', 'downloads', 'training', 'tests']
+    const TABS = ['tasks', 'downloads', 'training', 'tests', 'transfers']
 
     /** Translate function installed by apply(); components call it via useT(). */
     let translate = (key) => key
@@ -40,6 +40,7 @@ window.__ModuleLoader__.load({
       'section.training': '训练',
       'section.tests': '测试',
       'section.tasks': '任务',
+      'section.transfers': '传输',
       'source.local': '本地',
       'source.remote': '服务器',
       'state.fail': '异常',
@@ -59,6 +60,7 @@ window.__ModuleLoader__.load({
       'empty.training': '暂无训练记录',
       'empty.tests': '暂无测试记录',
       'empty.tasks': '暂无任务计划',
+      'empty.transfers': '暂无文件传输',
       'empty.filtered': '当前筛选下没有记录',
       'empty.search': '没有匹配的记录',
       'status.running': '进行中',
@@ -98,6 +100,20 @@ window.__ModuleLoader__.load({
       'detail.extractPending': '待解压 · {archives} 个压缩包',
       'status.extracting': '解压中',
       'tag.extract': '解压',
+      'transfer.upload': '上传',
+      'transfer.download': '下载',
+      'transfer.remote': '远端',
+      'transfer.session': '会话',
+      'transfer.unknown': '传输',
+      'transfer.phaseReceiving': '接收中',
+      'transfer.phaseSending': '发送中',
+      'transfer.phaseProcess': '进行中',
+      'transfer.rate': '{value}/s',
+      'transfer.elapsed': '已运行 {value}',
+      'transfer.panelCount': '{active} 进行中 · {done} 已完成',
+      'transfer.clear': '清空已完成',
+      'stat.transferActive': '{n} 进行中',
+      'stat.transferDone': '{n} 已完成',
       'detail.passed': '{n} passed',
       'detail.failed': '{n} failed',
       'gpu.label': 'GPU',
@@ -138,6 +154,7 @@ window.__ModuleLoader__.load({
       'section.training': 'Training',
       'section.tests': 'Tests',
       'section.tasks': 'Tasks',
+      'section.transfers': 'Transfers',
       'source.local': 'Local',
       'source.remote': 'Server',
       'state.fail': 'Error',
@@ -157,6 +174,7 @@ window.__ModuleLoader__.load({
       'empty.training': 'No training records yet',
       'empty.tests': 'No test records yet',
       'empty.tasks': 'No task plan yet',
+      'empty.transfers': 'No file transfers yet',
       'empty.filtered': 'Nothing matches this filter',
       'empty.search': 'Nothing matches this search',
       'status.running': 'Running',
@@ -196,6 +214,20 @@ window.__ModuleLoader__.load({
       'detail.extractPending': 'Waiting to extract · {archives} archives',
       'status.extracting': 'Extracting',
       'tag.extract': 'Extract',
+      'transfer.upload': 'Upload',
+      'transfer.download': 'Download',
+      'transfer.remote': 'Remote',
+      'transfer.session': 'Session',
+      'transfer.unknown': 'Transfer',
+      'transfer.phaseReceiving': 'Receiving',
+      'transfer.phaseSending': 'Sending',
+      'transfer.phaseProcess': 'Running',
+      'transfer.rate': '{value}/s',
+      'transfer.elapsed': 'elapsed {value}',
+      'transfer.panelCount': '{active} running · {done} done',
+      'transfer.clear': 'Clear finished',
+      'stat.transferActive': '{n} running',
+      'stat.transferDone': '{n} done',
       'detail.passed': '{n} passed',
       'detail.failed': '{n} failed',
       'gpu.label': 'GPU',
@@ -250,6 +282,11 @@ window.__ModuleLoader__.load({
       ], 13),
       tests: glyph([
         h('path', { key: 'a', d: 'M3.4 8.5l3 3 6.2-6.6' }),
+      ], 13),
+      transfers: glyph([
+        h('path', { key: 'a', d: 'M8 2.6v10.8' }),
+        h('path', { key: 'b', d: 'M5.2 5.4L8 2.6l2.8 2.8' }),
+        h('path', { key: 'c', d: 'M10.8 10.6L8 13.4l-2.8-2.8' }),
       ], 13),
     }
 
@@ -421,6 +458,7 @@ window.__ModuleLoader__.load({
       }
       if (item.kind === 'suite') return fmt(t, 'detail.suite', { n: item.fileCount ?? 0 })
       if (item.kind === 'task') return typeof item.detail === 'string' ? item.detail : ''
+      if (item.kind === 'transfer') return transferDetail(item, t)
       if (item.kind === 'extract') return extractDetail(item.extract, t)
       if (item.kind === 'session') return typeof item.detail === 'string' && item.detail !== '' ? item.detail : t('detail.session')
       if (item.kind === 'run') {
@@ -430,6 +468,51 @@ window.__ModuleLoader__.load({
       }
       if (typeof item.detailKey === 'string' && item.detailKey !== '') return t(item.detailKey)
       return ''
+    }
+
+    /** Human duration for transfer rows. */
+    function formatDuration(ms) {
+      if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return ''
+      const total = Math.round(ms / 1000)
+      if (total < 60) return `${total}s`
+      const minutes = Math.floor(total / 60)
+      const seconds = total % 60
+      if (minutes < 60) return `${minutes}m ${seconds}s`
+      return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
+    }
+
+    /** Arrow + localized direction label. */
+    function directionInfo(direction, t) {
+      if (direction === 'upload') return { arrow: '↑', label: t('transfer.upload') }
+      if (direction === 'download') return { arrow: '↓', label: t('transfer.download') }
+      if (direction === 'remote') return { arrow: '⇄', label: t('transfer.remote') }
+      if (direction === 'session') return { arrow: '·', label: t('transfer.session') }
+      return { arrow: '·', label: t('transfer.unknown') }
+    }
+
+    /** One-line transfer summary. */
+    function transferDetail(item, t) {
+      const transfer = item.transfer === null || item.transfer === undefined ? {} : item.transfer
+      const info = directionInfo(transfer.direction, t)
+      const parts = [`${info.arrow} ${info.label}`]
+      if (transfer.phase === 'done') {
+        if (item.size > 0) parts.push(formatBytes(item.size))
+        if (typeof transfer.durationMs === 'number') parts.push(formatDuration(transfer.durationMs))
+        return parts.join(' · ')
+      }
+      if (transfer.phase === 'process') {
+        if (typeof transfer.alias === 'string' && transfer.alias !== '') parts.push(transfer.alias)
+        if ((typeof transfer.sourcePath === 'string' && transfer.sourcePath !== '') || (typeof transfer.destPath === 'string' && transfer.destPath !== '')) {
+          parts.push(`${transfer.sourcePath || '?'} → ${transfer.destPath || '?'}`)
+        }
+        if (typeof transfer.etime === 'string' && transfer.etime !== '') parts.push(fmt(t, 'transfer.elapsed', { value: transfer.etime }))
+        return parts.join(' · ')
+      }
+      parts.push(transfer.phase === 'receiving' ? t('transfer.phaseReceiving') : t('transfer.phaseSending'))
+      if (item.size > 0) parts.push(formatBytes(item.size))
+      if (typeof transfer.rate === 'number' && transfer.rate > 0) parts.push(fmt(t, 'transfer.rate', { value: formatBytes(transfer.rate) }))
+      if (typeof transfer.elapsedMs === 'number') parts.push(fmt(t, 'transfer.elapsed', { value: formatDuration(transfer.elapsedMs) }))
+      return parts.join(' · ')
     }
 
     /** One-line summary for an extraction status row. */
@@ -502,20 +585,26 @@ window.__ModuleLoader__.load({
       const metrics = metricsText(item)
       const source = item.source === 'remote' ? t('source.remote') : t('source.local')
       const isTask = item.kind === 'task' && item.task !== undefined && item.task !== null
+      const isTransfer = item.kind === 'transfer'
+      const transferInfo = isTransfer ? directionInfo(item.transfer?.direction, t) : null
       const meta = isTask ? detail : [source, detail, metrics].filter(Boolean).join(' · ')
       const stamp = item.mtime > 0 ? relativeTime(item.mtime, t) : ''
       const absolute = item.mtime > 0 ? formatTime(item.mtime) : ''
       const statusText = isTask
         ? item.status === 'done' ? t('status.done') : item.status === 'pending' ? t('status.pending') : t('status.running')
-        : item.kind === 'extract' && item.status === 'running'
-          ? t('status.extracting')
-          : item.status === 'running' ? t('status.running') : item.status === 'failed' ? t('status.failed') : ''
+        : isTransfer
+          ? item.status === 'done' ? t('status.done') : t('status.running')
+          : item.kind === 'extract' && item.status === 'running'
+            ? t('status.extracting')
+            : item.status === 'running' ? t('status.running') : item.status === 'failed' ? t('status.failed') : ''
       const copyable = typeof item.path === 'string' && item.path !== ''
       const title = copyable
         ? `${item.path}${absolute === '' ? '' : `\n${absolute}`}\n${t('row.copyHint')}`
-        : isTask && typeof item.task.evidence === 'string' && item.task.evidence !== ''
-          ? `${item.name}\n${item.task.evidence}`
-          : (absolute === '' ? item.name : `${item.name}\n${absolute}`)
+        : isTransfer
+          ? (item.transfer?.command || item.transfer?.file || item.name)
+          : isTask && typeof item.task.evidence === 'string' && item.task.evidence !== ''
+            ? `${item.name}\n${item.task.evidence}`
+            : (absolute === '' ? item.name : `${item.name}\n${absolute}`)
       const rowClass = `dd-row${item.status === 'failed' ? ' dd-row-failed' : item.status === 'running' ? ' dd-row-running' : ''}${isTask && item.task.next === true ? ' dd-row-next' : ''}`
       const extracting = item.kind === 'extract' && item.extract !== null && item.extract !== undefined && typeof item.extract.percent === 'number' && item.extract.state !== 'done'
       const taskBar = isTask && typeof item.task.percent === 'number' && item.task.percent > 0 && item.task.percent < 100
@@ -533,6 +622,7 @@ window.__ModuleLoader__.load({
             h('span', { key: 'name', className: 'dd-row-name' }, item.name),
             isTask && item.task.next === true ? h('span', { key: 'next', className: 'dd-tag dd-tag-next' }, t('task.nextTag')) : null,
             item.kind === 'extract' ? h('span', { key: 'kind', className: 'dd-tag dd-tag-extract' }, t('tag.extract')) : null,
+            isTransfer && transferInfo !== null ? h('span', { key: 'direction', className: 'dd-tag dd-tag-transfer' }, `${transferInfo.arrow} ${transferInfo.label}`) : null,
             item.tag ? h('span', { key: 'tag', className: 'dd-tag', title: item.tag }, item.tag) : null,
           ]),
           h('span', { key: 'meta', className: 'dd-row-meta' }, meta),
@@ -542,6 +632,9 @@ window.__ModuleLoader__.load({
           taskBar
             ? h('span', { key: 'taskbar', className: 'dd-row-bar' }, h('span', { className: 'dd-row-fill', style: { width: `${item.task.percent}%` } }))
             : null,
+          isTransfer && item.status === 'running'
+            ? h('span', { key: 'transferbar', className: 'dd-row-bar dd-row-bar-active' }, h('span', { className: 'dd-row-fill' }))
+            : null,
         ]),
         h('span', { key: 'side', className: 'dd-row-side' }, [
           statusText === '' ? null : h('span', { key: 'status', className: `dd-row-pill dd-row-pill-${item.status}` }, statusText),
@@ -549,7 +642,7 @@ window.__ModuleLoader__.load({
             ? h('span', { key: 'estimate', className: 'dd-row-time' }, fmt(t, 'task.estimate', { value: item.task.estimate }))
             : null,
           item.size > 0 && item.kind !== 'extract' ? h('span', { key: 'size', className: 'dd-row-size' }, formatBytes(item.size)) : null,
-          stamp === '' ? null : h('span', { key: 'time', className: 'dd-row-time' }, stamp),
+          isTransfer && item.status === 'running' ? null : (stamp === '' ? null : h('span', { key: 'time', className: 'dd-row-time' }, stamp)),
           copyable
             ? h('span', { key: 'copy', className: 'dd-row-copy', 'aria-hidden': true }, h('svg', {
                 viewBox: '0 0 16 16',
@@ -723,6 +816,7 @@ window.__ModuleLoader__.load({
       })
       const [toast, setToast] = React.useState(null)
       const [query, setQuery] = React.useState('')
+      const [transferData, setTransferData] = React.useState(null)
       const alive = React.useRef(true)
       const busy = React.useRef(false)
 
@@ -768,6 +862,26 @@ window.__ModuleLoader__.load({
       }, [load])
 
       React.useEffect(() => {
+        let cancelled = false
+        const tick = async () => {
+          try {
+            const response = await fetch(`${API}/transfers`, { cache: 'no-store', headers: { accept: 'application/json' } })
+            if (!response.ok) return
+            const payload = await response.json()
+            if (!cancelled) setTransferData(payload)
+          } catch {
+            /* Transfers stay on the last known state. */
+          }
+        }
+        void tick()
+        const timer = setInterval(tick, 2000)
+        return () => {
+          cancelled = true
+          clearInterval(timer)
+        }
+      }, [])
+
+      React.useEffect(() => {
         if (tab !== null) writeStore(STORE_TAB, tab)
       }, [tab])
 
@@ -782,6 +896,7 @@ window.__ModuleLoader__.load({
       }, [toast])
 
       const data = state.data
+      const transfers = transferData !== null ? transferData : (data?.transfers ?? null)
 
       React.useEffect(() => {
         if (tab === null && data !== null) setTab(smartTab(data))
@@ -793,7 +908,13 @@ window.__ModuleLoader__.load({
 
       const activeTab = tab ?? 'tasks'
       const isTasks = activeTab === 'tasks'
-      const activeSection = data === null ? null : isTasks ? { items: data.tasks?.items ?? [] } : data[activeTab]
+      const activeSection = data === null
+        ? null
+        : isTasks
+          ? { items: data.tasks?.items ?? [] }
+          : activeTab === 'transfers'
+            ? { items: [...(transfers?.active ?? []), ...(transfers?.completed ?? [])] }
+            : data[activeTab]
       const all = Array.isArray(activeSection?.items) ? activeSection.items : []
       const items = isTasks || source === 'all' ? all : all.filter((entry) => entry.source === source)
       const needle = query.trim().toLowerCase()
@@ -877,6 +998,11 @@ window.__ModuleLoader__.load({
           if ((data?.tests?.failed ?? 0) > 0) parts.push(fmt(t, 'stat.failed', { n: data.tests.failed }))
           return parts.join(' · ')
         })(),
+        transfers: (() => {
+          const active = transfers?.active?.length ?? 0
+          const done = transfers?.completed?.length ?? 0
+          return active > 0 ? fmt(t, 'stat.transferActive', { n: active }) : fmt(t, 'stat.transferDone', { n: done })
+        })(),
       }
 
       const statTone = {
@@ -884,6 +1010,7 @@ window.__ModuleLoader__.load({
         downloads: (data?.downloads?.running ?? 0) > 0 ? 'run' : null,
         training: (data?.training?.running ?? 0) > 0 ? 'run' : null,
         tests: (data?.tests?.failed ?? 0) > 0 ? 'bad' : null,
+        transfers: (transfers?.active?.length ?? 0) > 0 ? 'run' : null,
       }
 
       return h('div', { className: 'dd-page' }, [
@@ -956,7 +1083,9 @@ window.__ModuleLoader__.load({
               ? '—'
               : key === 'tasks'
                 ? `${data.tasks?.done ?? 0}/${data.tasks?.total ?? 0}`
-                : String(data[key]?.count ?? 0)),
+                : key === 'transfers'
+                  ? String(transfers?.active?.length ?? 0)
+                  : String(data[key]?.count ?? 0)),
             h('span', { key: 'meta', className: 'dd-stat-meta' }, statMeta[key]),
           ]))),
           h('section', { key: 'panel', className: 'dd-panel', role: 'tabpanel' }, [
@@ -964,9 +1093,11 @@ window.__ModuleLoader__.load({
               h('span', { key: 'title', className: 'dd-pane-title' }, t(`section.${activeTab}`)),
               h('span', { key: 'count', className: 'dd-pane-count' }, isTasks
                 ? fmt(t, 'task.panelCount', { done: data?.tasks?.done ?? 0, total: data?.tasks?.total ?? 0 })
-                : source === 'all'
-                  ? fmt(t, 'summary.items', { n: visibleItems.length })
-                  : fmt(t, 'count.filtered', { shown: visibleItems.length, total: all.length })),
+                : activeTab === 'transfers'
+                  ? fmt(t, 'transfer.panelCount', { active: transfers?.active?.length ?? 0, done: transfers?.completed?.length ?? 0 })
+                  : source === 'all'
+                    ? fmt(t, 'summary.items', { n: visibleItems.length })
+                    : fmt(t, 'count.filtered', { shown: visibleItems.length, total: all.length })),
               h('span', { key: 'spacer', className: 'dd-spacer' }),
               h('input', {
                 key: 'search',
@@ -977,6 +1108,21 @@ window.__ModuleLoader__.load({
                 'aria-label': t('filter.search'),
                 onChange: (event) => setQuery(event.target.value),
               }),
+              activeTab === 'transfers' && (transfers?.completed?.length ?? 0) > 0
+                ? h('button', {
+                    key: 'clear-transfers',
+                    type: 'button',
+                    className: 'dd-clear',
+                    onClick: async () => {
+                      try {
+                        const response = await fetch(`${API}/transfers/clear`, { method: 'POST', cache: 'no-store', headers: { accept: 'application/json' } })
+                        if (response.ok) setTransferData(await response.json())
+                      } catch {
+                        /* Keep the last known list. */
+                      }
+                    },
+                  }, t('transfer.clear'))
+                : null,
               isTasks
                 ? null
                 : h('div', { key: 'seg', className: 'dd-seg', role: 'group', 'aria-label': t('filter.label') }, [
@@ -1083,7 +1229,7 @@ window.__ModuleLoader__.load({
       '.dd-hero-foot{display:flex;align-items:center;gap:10px;min-width:0;font-size:11.5px;color:var(--dsw-alias-label-secondary)}',
       '.dd-hero-foot>span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
       '.dd-hero-est{margin-left:auto;white-space:nowrap}',
-      '.dd-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;flex:none}',
+      '.dd-stats{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;flex:none}',
       '.dd-stat{position:relative;display:flex;flex-direction:column;align-items:flex-start;gap:2px;padding:10px 14px 11px;border:1px solid var(--dsw-alias-border-l1);border-radius:11px;background:var(--dsw-alias-bg-layer-1);color:inherit;font:inherit;text-align:left;cursor:pointer;transition:border-color .15s,background .15s}',
       '.dd-stat:hover{border-color:var(--dsw-alias-border-l2)}',
       '.dd-stat:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px}',
@@ -1102,6 +1248,8 @@ window.__ModuleLoader__.load({
       '.dd-search{width:160px;min-width:90px;border:1px solid var(--dsw-alias-border-l1);border-radius:6px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit;font-size:11.5px;line-height:18px;padding:2px 8px;outline:none}',
       '.dd-search:focus{border-color:var(--dsw-alias-brand-primary)}',
       '.dd-search::placeholder{color:var(--dsw-alias-label-secondary)}',
+      '.dd-clear{border:1px solid var(--dsw-alias-border-l1);background:transparent;color:var(--dsw-alias-label-secondary);border-radius:6px;font:inherit;font-size:10.5px;line-height:18px;padding:2px 7px;cursor:pointer;white-space:nowrap}',
+      '.dd-clear:hover{color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-brand-primary)}',
       '.dd-pane-title{font-size:14px;font-weight:600}',
       '.dd-pane-count{font-size:12px;color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums}',
       '.dd-seg{display:flex;gap:2px;padding:2px;border-radius:7px;background:var(--dsw-alias-bg-base)}',
@@ -1139,11 +1287,14 @@ window.__ModuleLoader__.load({
       '.dd-row-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
       '.dd-tag{flex:none;font-size:10.5px;line-height:17px;padding:0 7px;border-radius:5px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
       '.dd-tag-extract{color:var(--dsw-alias-brand-primary)}',
+      '.dd-tag-transfer{color:var(--dsw-alias-brand-primary)}',
       '.dd-tag-next{color:var(--dsw-alias-label-primary);border:1px solid var(--dsw-alias-brand-primary);background:var(--dsw-alias-bg-base)}',
       '.dd-row-next{box-shadow:inset 3px 0 0 var(--dsw-alias-brand-primary)}',
       '.dd-row-meta{font-size:12.5px;color:var(--dsw-alias-label-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.4}',
       '.dd-row-bar{display:block;height:4px;margin-top:3px;border-radius:2px;background:var(--dsw-alias-bg-layer-2);overflow:hidden}',
       '.dd-row-fill{display:block;height:100%;border-radius:2px;background:var(--dsw-alias-brand-primary);transition:width .4s ease}',
+      '.dd-row-bar-active .dd-row-fill{width:35%;animation:dd-transfer 1.1s ease-in-out infinite alternate}',
+      '@keyframes dd-transfer{from{transform:translateX(0);opacity:.45}to{transform:translateX(185%);opacity:1}}',
       '.dd-row-side{flex:none;display:flex;align-items:center;gap:10px;font-size:12.5px;color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums}',
       '.dd-row-pill{font-size:11px;line-height:18px;padding:0 7px;border-radius:999px;border:1px solid currentColor;white-space:nowrap}',
       '.dd-row-pill-running{color:var(--dsw-alias-state-warn-primary)}',
