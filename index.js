@@ -296,6 +296,38 @@ def transfer_processes():
         })
     return out
 
+def download_processes():
+    out = []
+    for line in sh("ps -eo pid=,args= 2>/dev/null").splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) < 2:
+            continue
+        pid, args = parts
+        try:
+            argv = shlex.split(args)
+        except Exception:
+            argv = args.split()
+        program = os.path.basename(argv[0]).lower() if argv else ''
+        if program not in ('curl', 'wget', 'aria2c'):
+            continue
+        url = ''
+        output = ''
+        for index, token in enumerate(argv):
+            if token.startswith('http://') or token.startswith('https://'):
+                url = token
+            elif token in ('-o', '--output') and index + 1 < len(argv):
+                output = argv[index + 1]
+            elif token.startswith('--output='):
+                output = token.split('=', 1)[1]
+        out.append({
+            'pid': pid,
+            'program': program,
+            'args': args[:300],
+            'url': url[:500],
+            'output': output[:200],
+        })
+    return out
+
 def gpu_info():
     out = []
     raw = sh("nvidia-smi --query-gpu=index,uuid,name,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw,power.limit,fan.speed,clocks.sm,driver_version --format=csv,noheader,nounits 2>/dev/null")
@@ -762,6 +794,7 @@ data = {
     'gpu': gpu_info(),
     'system': system_info(),
     'transfers': transfer_processes(),
+    'downloadProcesses': download_processes(),
 }
 print('@@DINO@@' + json.dumps(data, ensure_ascii=False))
 `
@@ -776,6 +809,17 @@ function number(value, fallback, min, max) {
   const parsed = typeof value === 'number' ? value : Number(value)
   if (!Number.isFinite(parsed)) return fallback
   return Math.min(max, Math.max(min, Math.round(parsed)))
+}
+
+/** Normalize optional download total-size hints (file name -> bytes). */
+function normalizeDownloadTotals(raw) {
+  if (raw === null || raw === undefined || typeof raw !== 'object' || Array.isArray(raw)) return {}
+  const totals = {}
+  for (const [name, value] of Object.entries(raw)) {
+    if (typeof name !== 'string' || typeof value !== 'number' || !Number.isFinite(value) || value <= 0) continue
+    totals[name.trim()] = Math.round(value)
+  }
+  return totals
 }
 
 /** Normalize the optional per-task evidence rules from config. */
@@ -820,6 +864,7 @@ function normalizeConfig(config) {
     refreshSeconds: number(raw.refreshSeconds, 2, 2, 300),
     taskPlan: text(raw.taskPlan ?? raw.planFile ?? tasks.plan, ''),
     taskRules: normalizeTaskRules(raw.taskRules ?? tasks.rules),
+    downloadTotals: normalizeDownloadTotals(raw.downloadTotals),
     aiEnabled: ai.enabled === true,
     aiIntervalSeconds: number(ai.intervalSeconds, 300, 30, 3600),
     aiMaxTokens: number(ai.maxTokens, 500, 100, 2000),
@@ -989,6 +1034,8 @@ const remoteCpuState = new Map()
 const gpuHistory = new Map()
 /** Download write progress keyed by source:path. */
 const downloadProgress = new Map()
+/** Content-length lookups keyed by URL (10 min TTL). */
+const downloadTotalCache = new Map()
 /** dsh-ssh staging files currently seen, keyed by staging file name. */
 const stagingTransfers = new Map()
 /** Recently finished staging transfers. */
@@ -1168,17 +1215,66 @@ function trackDownloadProgress(items) {
       entry.lastAt = now
     }
     if (mtime > entry.lastChangeAt) entry.lastChangeAt = mtime
+    const total = typeof item.downloadTotal === 'number' && item.downloadTotal > 0 ? item.downloadTotal : null
+    const percent = total !== null && item.size > 0 ? Math.min(100, Math.round((item.size / total) * 1000) / 10) : null
+    const stalled = now - entry.lastChangeAt > 90000
+    const rate = entry.rate
+    const etaSeconds = !stalled && total !== null && total > item.size && typeof rate === 'number' && rate > 0
+      ? Math.round((total - item.size) / rate)
+      : null
     item.progress = {
       size: item.size,
-      rate: entry.rate,
+      total,
+      percent,
+      rate,
+      etaSeconds,
       observedMs: now - entry.startedAt,
       stalledForMs: Math.max(0, now - entry.lastChangeAt),
-      stalled: now - entry.lastChangeAt > 90000,
-      percent: null,
+      stalled,
     }
   }
   for (const key of downloadProgress.keys()) {
     if (!active.has(key)) downloadProgress.delete(key)
+  }
+  return items
+}
+
+/** Apply configured or observed total sizes to running downloads. */
+async function resolveDownloadTotals(webServer, options, payload, items) {
+  const configured = options.downloadTotals ?? {}
+  const processes = Array.isArray(payload?.downloadProcesses) ? payload.downloadProcesses : []
+  for (const item of items) {
+    if (item.kind !== 'file' || item.status !== 'running') continue
+    if (typeof item.downloadTotal === 'number' && item.downloadTotal > 0) continue
+    const name = String(item.name ?? '')
+    const base = name.split('/').pop()
+    for (const [pattern, total] of Object.entries(configured)) {
+      if (name.includes(pattern) || base === pattern) {
+        item.downloadTotal = total
+        break
+      }
+    }
+    if (item.source !== 'remote' || (typeof item.downloadTotal === 'number' && item.downloadTotal > 0)) continue
+    const process = processes.find(entry => {
+      const output = String(entry.output ?? '')
+      const baseOutput = output.split('/').pop()
+      return baseOutput !== '' && (baseOutput === base || name.endsWith(output)) || String(entry.args ?? '').includes(base)
+    })
+    if (process === undefined || typeof process.url !== 'string' || process.url === '') continue
+    const cache = downloadTotalCache.get(process.url)
+    if (cache !== undefined && Date.now() - cache.at < 600000) {
+      if (typeof cache.total === 'number') item.downloadTotal = cache.total
+      continue
+    }
+    try {
+      const headers = await execRemote(webServer.getOrigin(), options.remoteAlias, `curl -sIL --max-time 6 -- ${shellQuote(process.url)} 2>/dev/null`, 15000)
+      const matches = [...headers.matchAll(/^content-length:\s*(\d+)\s*$/gim)]
+      const total = matches.length > 0 ? Number(matches[matches.length - 1][1]) : null
+      downloadTotalCache.set(process.url, { total: Number.isFinite(total) ? total : null, at: Date.now() })
+      if (Number.isFinite(total) && total > 0) item.downloadTotal = total
+    } catch {
+      downloadTotalCache.set(process.url, { total: null, at: Date.now() })
+    }
   }
   return items
 }
@@ -2531,6 +2627,7 @@ async function buildSnapshot(webServer, options, aiContext = null) {
   snapshot.transfers = buildTransferItems(latestStaging, remoteTransfers)
 
   const downloads = dedupeDownloadItems(newest([...local.downloads, ...(remote?.downloads ?? [])], maxItems))
+  await resolveDownloadTotals(webServer, options, remotePayload, downloads)
   trackDownloadProgress(downloads)
   const training = selectTraining([...local.training, ...(remote?.training ?? [])], maxItems)
   const tests = selectTests([...local.tests, ...(remote?.tests ?? [])], maxItems)

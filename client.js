@@ -87,9 +87,12 @@ window.__ModuleLoader__.load({
       'detail.remoteDirectory': '服务器目录',
       'detail.remoteDownload': '服务器文件',
       'detail.remotePartial': '下载中临时文件',
-      'detail.downloading': '已下载 {size}{rate} · 已观察 {elapsed}',
+      'detail.downloading': '已下载 {size}{rate}{percent}{eta} · 已观察 {elapsed}',
       'detail.downloadRate': ' · {value}/s',
-      'detail.downloadStalled': '已下载 {size} · 停滞（{elapsed} 未增长）',
+      'detail.downloadPercent': ' · {percent}%',
+      'detail.downloadEta': ' · 预计剩余 {value}',
+      'detail.downloadEtaUnknown': ' · 预计剩余未知',
+      'detail.downloadStalled': '已下载 {size}{percent} · 停滞（{elapsed} 未增长）',
       'detail.run': '产物：{list}',
       'detail.runEmpty': '暂无训练产物',
       'detail.remoteRun': '服务端产物：{list}',
@@ -246,9 +249,12 @@ window.__ModuleLoader__.load({
       'detail.remoteDirectory': 'Server directory',
       'detail.remoteDownload': 'Server file',
       'detail.remotePartial': 'Partial download',
-      'detail.downloading': 'Downloaded {size}{rate} · observed {elapsed}',
+      'detail.downloading': 'Downloaded {size}{rate}{percent}{eta} · observed {elapsed}',
       'detail.downloadRate': ' · {value}/s',
-      'detail.downloadStalled': 'Downloaded {size} · stalled ({elapsed} without growth)',
+      'detail.downloadPercent': ' · {percent}%',
+      'detail.downloadEta': ' · ETA {value}',
+      'detail.downloadEtaUnknown': ' · ETA unknown',
+      'detail.downloadStalled': 'Downloaded {size}{percent} · stalled ({elapsed} without growth)',
       'detail.run': 'Artifacts: {list}',
       'detail.runEmpty': 'No training artifacts yet',
       'detail.remoteRun': 'Server artifacts: {list}',
@@ -563,14 +569,19 @@ window.__ModuleLoader__.load({
       return ''
     }
 
-    /** One-line download progress (bytes, rate, observed time, stall state). */
+    /** One-line download progress (bytes, rate, percent, ETA, stall state). */
     function downloadProgressDetail(item, t) {
       const progress = item.progress ?? {}
       const size = formatBytes(progress.size ?? item.size ?? 0)
-      const elapsed = formatDuration(progress.observedMs ?? 0)
-      if (progress.stalled === true) return fmt(t, 'detail.downloadStalled', { size, elapsed: formatDuration(progress.stalledForMs ?? 0) })
+      const percent = typeof progress.percent === 'number' ? fmt(t, 'detail.downloadPercent', { percent: progress.percent }) : ''
+      if (progress.stalled === true) {
+        return fmt(t, 'detail.downloadStalled', { size, percent, elapsed: formatDuration(progress.stalledForMs ?? 0) })
+      }
       const rate = typeof progress.rate === 'number' && progress.rate > 0 ? fmt(t, 'detail.downloadRate', { value: formatBytes(progress.rate) }) : ''
-      return fmt(t, 'detail.downloading', { size, rate, elapsed })
+      const eta = typeof progress.etaSeconds === 'number'
+        ? fmt(t, 'detail.downloadEta', { value: formatDuration(progress.etaSeconds * 1000) })
+        : (typeof progress.total === 'number' ? t('detail.downloadEtaUnknown') : '')
+      return fmt(t, 'detail.downloading', { size, rate, percent, eta, elapsed: formatDuration(progress.observedMs ?? 0) })
     }
 
     /** Human duration for transfer rows. */

@@ -19,6 +19,8 @@
           benchRoot: ''
         # Optional Markdown task plan, relative to localRoot. Empty = no tasks.
         taskPlan: ''
+        # Optional known total sizes (bytes) for download percent/ETA.
+        downloadTotals: {}
         # Optional per-task evidence rules, e.g. T1: { doneWhen: [...] }.
         taskRules: {}
         # Optional low-token AI task classification through the Host llm service.
