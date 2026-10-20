@@ -21,5 +21,5 @@
         taskPlan: ''
         # Optional per-task evidence rules, e.g. T1: { doneWhen: [...] }.
         taskRules: {}
-        # Seconds before the cached snapshot is rebuilt.
-        refreshSeconds: 20
+        # Seconds before the cached snapshot is rebuilt (2 = near real-time).
+        refreshSeconds: 2

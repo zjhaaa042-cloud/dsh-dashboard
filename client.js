@@ -15,7 +15,7 @@ window.__ModuleLoader__.load({
     const NS = 'dino-dashboard'
     const PANEL_ID = 'dino-dashboard'
     const API = 'api/dino-dashboard'
-    const POLL_MS = 15000
+    const POLL_MS = 2000
     const STORE_TAB = 'dino-dashboard:tab:v2'
     const STORE_SOURCE = 'dino-dashboard:source'
     const TABS = ['tasks', 'downloads', 'training', 'tests', 'transfers']
@@ -1063,14 +1063,21 @@ window.__ModuleLoader__.load({
         alive.current = true
         let cancelled = false
         const tick = () => {
-          if (!cancelled) void load(false)
+          if (!cancelled && document.visibilityState !== 'hidden') void load(false)
         }
         tick()
         const timer = setInterval(tick, POLL_MS)
+        const onVisible = () => {
+          if (document.visibilityState !== 'hidden') void load(false)
+        }
+        document.addEventListener('visibilitychange', onVisible)
+        window.addEventListener('focus', onVisible)
         return () => {
           cancelled = true
           alive.current = false
           clearInterval(timer)
+          document.removeEventListener('visibilitychange', onVisible)
+          window.removeEventListener('focus', onVisible)
         }
       }, [load])
 

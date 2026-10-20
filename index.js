@@ -814,7 +814,7 @@ function normalizeConfig(config) {
     localRoot: text(raw.localRoot, DEFAULT_LOCAL_ROOT),
     remoteAlias: aliases.length > 0 ? aliases[0] : DEFAULT_REMOTE_ALIAS,
     remoteAliases: aliases,
-    refreshSeconds: number(raw.refreshSeconds, 20, 5, 300),
+    refreshSeconds: number(raw.refreshSeconds, 2, 2, 300),
     taskPlan: text(raw.taskPlan ?? raw.planFile ?? tasks.plan, ''),
     taskRules: normalizeTaskRules(raw.taskRules ?? tasks.rules),
     showLocal: raw.showLocal !== false,
