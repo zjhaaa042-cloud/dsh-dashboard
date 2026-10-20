@@ -16,5 +16,10 @@
           downloadRoot: ''
           trainingRoot: ''
           logRoot: ''
+          benchRoot: ''
+        # Optional Markdown task plan, relative to localRoot. Empty = no tasks.
+        taskPlan: ''
+        # Optional per-task evidence rules, e.g. T1: { doneWhen: [...] }.
+        taskRules: {}
         # Seconds before the cached snapshot is rebuilt.
         refreshSeconds: 20

@@ -5,7 +5,7 @@ DeepSeek Harness（DSH）Web UI 侧边栏插件：在左侧新增「项目看板
 ## 功能
 
 - **紧凑单面板**：顶部任务进度卡 + 任务 / 下载 / 训练 / 测试 / 传输五个页签，列表在面板内滚动。
-- **任务进度**：读取工作区任务计划，结合服务器产物与运行中的进程推断每项任务的状态、进度和下一步（转换、校验、训练、评测进程会自动识别）。
+- **任务进度**：从配置的 `taskPlan`（Markdown 表格或 checkbox 列表）生成任务；状态可由计划标记和 `taskRules` 中配置的证据路径 / 进程匹配推断。未配置计划时任务页签为空，不会内置任何示例计划。
 - **下载与解压**：本地下载目录与远端 raw 目录；归档显示已解压体积/文件数，解压中显示百分比和当前第几个压缩包。
 - **模型训练**：最近的训练产物；GPU 支持**本机 + 多台远端**（`remoteAliases`），每个来源一组，显示利用率、显存、温度、功耗、风扇、频率、驱动、占用进程，以及该机器的 CPU / 内存 / load；每张卡带一条最近约 30 个采样的利用率迷你趋势线。
 - **测试信息**：pytest 历史（每个 run 目录取最新一份日志）、评测指标和结果目录。
@@ -37,10 +37,37 @@ config:
     downloadRoot: '/data/downloads'
     trainingRoot: '/data/runs'
     logRoot: '/data/logs'
+    benchRoot: '/data/runs/bench'    # 可选：bench 汇总目录
+  taskPlan: 'docs/TASKS.md'          # 可选：任务计划；留空则任务页签为空
+  taskRules:                         # 可选：任务证据规则（相对 localRoot 或远端文件后缀）
+    T1:
+      doneWhen: ['raw/PROVENANCE.txt', 'raw/SHA256SUMS.txt']  # 全部存在才完成
+    T2:
+      doneWhenAny: ['reports/*.json']                          # 任一存在即完成
+    T9:
+      runningWhen: ['tools/train.py']                          # 进程参数匹配即进行中
   refreshSeconds: 20                # 快照缓存时间
 ```
 
 `remoteAlias` 同时是项目数据（下载/训练/测试/任务）的主机来源；`remoteAliases` 里的额外主机只聚合 GPU 与主机资源。可选键：`showLocal`、`showRemote`（布尔）。
+
+任务计划支持两种写法（`taskPlan` 为空时不扫描、不显示任何任务）：
+
+```markdown
+| ID | 标题 | 类型 | 估算 | 状态 |
+| --- | --- | --- | --- | --- |
+| T1 | 下载并校验数据 | 数据 | 1h | 已完成 |
+| T2 | 训练模型 | 训练 | 2d | 进行中 |
+| T3 | 汇总报告 | 文档 | 1h | 待开始 |
+```
+
+```markdown
+- [x] T1 下载并校验数据
+- [ ] T2 训练模型
+- [ ] T3 汇总报告
+```
+
+`doneWhen` / `doneWhenAny` 支持相对路径、`*` 通配符，匹配本地文件或远端探测到的文件列表；`runningWhen` 匹配远端进程命令行。
 
 仓库里的 `cordis.patch.yml` 只保留空配置；本机实际使用的路径、SSH 别名等建议写在 **profile 的 `cordis.patch.yml`** 覆盖层（同 id 覆盖），这样仓库里不会出现个人路径。
 
