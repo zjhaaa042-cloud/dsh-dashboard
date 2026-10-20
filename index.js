@@ -610,8 +610,83 @@ def read_names(path):
     except OSError:
         return []
 
+def summary_modes(path):
+    out = {'tA': [], 'tB': []}
+    if not os.path.isfile(path):
+        return out
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as handle:
+            header = handle.readline().rstrip('\n').split(',')
+            try:
+                dataset_index = header.index('dataset')
+                mode_index = header.index('mode')
+            except ValueError:
+                return out
+            for line in handle:
+                parts = line.rstrip('\n').split(',')
+                if len(parts) <= max(dataset_index, mode_index):
+                    continue
+                dataset = parts[dataset_index].strip()
+                mode = parts[mode_index].strip()
+                if dataset == '' or mode not in ('tA', 'tB'):
+                    continue
+                if dataset not in out[mode]:
+                    out[mode].append(dataset)
+    except OSError:
+        pass
+    return out
+
+def metric_runs(root):
+    out = []
+    if not os.path.isdir(root):
+        return out
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return out
+    for name in names:
+        base = os.path.join(root, name)
+        if not os.path.isdir(base):
+            continue
+        try:
+            modes = sorted(os.listdir(base))
+        except OSError:
+            continue
+        for mode in modes:
+            if mode != 'tA' and mode != 'tB' and not mode.startswith('tB_s'):
+                continue
+            for filename in ('metrics.json', 'metrics_large.json'):
+                metrics_path = os.path.join(base, mode, 'results', filename)
+                if os.path.isfile(metrics_path):
+                    out.append({'dataset': name, 'mode': mode, 'file': filename})
+                    break
+    return out
+
+def fusion_runs(root):
+    out = []
+    if not os.path.isdir(root):
+        return out
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return out
+    for name in names:
+        base = os.path.join(root, name)
+        if not os.path.isdir(base):
+            continue
+        try:
+            entries = sorted(os.listdir(base))
+        except OSError:
+            continue
+        for entry in entries:
+            if not (entry.startswith('fuse_') or entry.startswith('agg_')):
+                continue
+            if os.path.isfile(os.path.join(base, entry, 'results', 'metrics.json')):
+                out.append({'dataset': name, 'run': entry})
+    return out
+
 def task_processes():
-    patterns = ('convert_to_unified.py', 'verify_manifest.py', 'prepare_omniad.py', 'make_configs.py', 'run_suite', 'tools/train.py', 'tools/evaluate.py', 'build_prototypes.py', 'build_global_stats.py', 'calibrate.py', 'tools/infer.py')
+    patterns = ('convert_to_unified.py', 'verify_manifest.py', 'prepare_omniad.py', 'make_configs.py', 'run_suite', 'tools/train.py', 'tools/evaluate.py', 'build_prototypes.py', 'build_global_stats.py', 'calibrate.py', 'tools/infer.py', 'evaluate_large.py', 'evaluate_sharded.py')
     out = []
     for line in sh("ps -eo pid=,etime=,args= 2>/dev/null").splitlines():
         parts = line.strip().split(None, 2)
@@ -650,6 +725,17 @@ def bench_files(path, limit=120):
     return out
 
 hints = set(['metrics.json', 'summary.csv', 'pytest.txt', 'report.md', 'student.pt', 'output.bin', 'training_state.pt', 'tA_summary.csv', 'tB_summary.csv'])
+manifest_files = []
+manifest_seen = set()
+for manifest_root in (CFG['manifestsRoot'], CFG.get('altManifestsRoot', '')):
+    if not manifest_root:
+        continue
+    for manifest in list_files(manifest_root, 1):
+        if manifest['p'] in manifest_seen:
+            continue
+        manifest_seen.add(manifest['p'])
+        manifest_files.append(manifest)
+
 data = {
     'host': sh('hostname 2>/dev/null'),
     'now': int(time.time()),
@@ -659,10 +745,13 @@ data = {
     'unified': list_dirs(CFG['unifiedRoot']),
     'convertReports': read_names(CFG['reportsRoot']),
     'verifyReports': [name for name in read_names(CFG['reportsRoot']) if name.endswith('_verify.json')],
-    'manifests': list_files(CFG['manifestsRoot'], 1),
+    'manifests': manifest_files,
     'benchFiles': bench_files(CFG['benchRoot']),
     'configFiles': list_files(CFG['configRoot'], 2),
     'docsFiles': list_files(CFG['docsRoot'], 2),
+    'summary': summary_modes(os.path.join(CFG['benchRoot'], 'summary.csv')),
+    'metricRuns': metric_runs(CFG['trainingRoot']),
+    'fusionRuns': fusion_runs(CFG['trainingRoot']),
     'taskProcesses': task_processes(),
     'convertDatasets': convert_datasets(CFG['convertLog']),
     'training': top_entries(CFG['trainingRoot'], hints),
@@ -1324,6 +1413,10 @@ function buildTasks(evidence, payload) {
   const processes = Array.isArray(payload?.taskProcesses) ? payload.taskProcesses : []
   const extractionGroups = Array.isArray(payload?.extraction) ? payload.extraction : []
   const convertDatasets = Array.isArray(payload?.convertDatasets) ? payload.convertDatasets : []
+  const metricRuns = Array.isArray(payload?.metricRuns) ? payload.metricRuns : []
+  const fusionRuns = Array.isArray(payload?.fusionRuns) ? payload.fusionRuns : []
+  const summaryModes = payload?.summary !== null && typeof payload?.summary === 'object' ? payload.summary : {}
+  const downloads = Array.isArray(payload?.downloads) ? payload.downloads : []
 
   const expected = Math.max(13, unified.length)
   const datasetTarget = Math.max(1, unified.length)
@@ -1331,15 +1424,26 @@ function buildTasks(evidence, payload) {
   const verified = verifyReports.length
   const manifestCount = manifests.length
   const yamlConfigs = configFiles.filter(file => /\.ya?ml$/i.test(file.p)).length
-  const benchLineCount = (file) => (file !== undefined && typeof file.lines === 'number' ? Math.max(0, file.lines - 1) : 0)
-  const tAFile = benchFiles.find(file => /tA_summary\.csv$/i.test(file.p))
-  const tBFile = benchFiles.find(file => /tB_summary\.csv$/i.test(file.p))
   const reportFile = benchFiles.find(file => /^report\.md$/i.test(file.p))
-  const fusionFiles = benchFiles.filter(file => /^fusion\//i.test(file.p))
-  const tA = benchLineCount(tAFile)
-  const tB = benchLineCount(tBFile)
-  const extractionDone = extractionGroups.length > 0 && extractionGroups.every(group => group.status === 'done')
-  const extractionFinished = extractionGroups.filter(group => group.status === 'done').length
+
+  // Completion evidence: runs/bench13/summary.csv carries the mode column, and
+  // every dataset run also leaves a results metrics file (metrics.json for the
+  // in-memory evaluator, metrics_large.json for the sharded one).
+  const metricByMode = { tA: new Set(), tB: new Set() }
+  const seedDatasets = new Set()
+  for (const run of metricRuns) {
+    const dataset = String(run.dataset ?? '')
+    const mode = String(run.mode ?? '')
+    if (dataset === '') continue
+    if (mode === 'tA' || mode === 'tB') metricByMode[mode].add(dataset)
+    else if (/^tB_s\d+/.test(mode)) seedDatasets.add(dataset)
+  }
+  for (const dataset of Array.isArray(summaryModes.tA) ? summaryModes.tA : []) metricByMode.tA.add(String(dataset))
+  for (const dataset of Array.isArray(summaryModes.tB) ? summaryModes.tB : []) metricByMode.tB.add(String(dataset))
+  const tA = metricByMode.tA.size
+  const tB = metricByMode.tB.size
+  const downloadNames = downloads.map(entry => String(entry.p ?? entry.name ?? ''))
+  const hasDownload = pattern => downloadNames.some(name => pattern.test(name))
 
   const rows = evidence.rows.map(entry => ({ ...entry, status: 'pending', percent: 0, detail: '', evidenceText: '' }))
   const byId = new Map(rows.map(row => [row.id, row]))
@@ -1348,14 +1452,22 @@ function buildTasks(evidence, payload) {
     if (row !== undefined) Object.assign(row, fields)
   }
 
+  // T1 covers the three plan downloads; other archives (e.g. omniad) are not
+  // part of its checklist and must not hold the task at 50% forever.
+  const t1Datasets = ['mvtec_ad', 'mvtec_loco', 'visa']
+  const t1Groups = extractionGroups.filter(group => t1Datasets.includes(String(group.dataset ?? '')))
+  const t1Extracted = t1Groups.filter(group => group.status === 'done').length
+  const t1Running = t1Groups.some(group => group.status === 'running')
+  const t1Verified = hasDownload(/PROVENANCE\.txt$/i) && hasDownload(/SHA256SUMS\.txt$/i)
+  const t1Done = t1Verified && t1Extracted >= t1Datasets.length
   set('T1', {
-    status: extractionDone ? 'done' : 'pending',
-    percent: extractionDone ? 100 : extractionGroups.length > 0 ? 50 : 0,
-    detail: extractionDone
-      ? `下载校验与解压完成（${extractionGroups.length} 个数据集）`
-      : extractionGroups.length > 0
-        ? `解压进行中 ${extractionFinished}/${extractionGroups.length}`
-        : '等待下载校验/解压结果',
+    status: t1Done ? 'done' : t1Running ? 'running' : 'pending',
+    percent: t1Done ? 100 : Math.min(99, Math.round((t1Extracted / t1Datasets.length) * 100)),
+    detail: t1Done
+      ? '下载校验与解压完成（3 个数据集）'
+      : t1Running
+        ? `解压进行中 ${t1Extracted}/${t1Datasets.length}`
+        : `等待下载校验/解压（已解压 ${t1Extracted}/${t1Datasets.length}${t1Verified ? ' · 校验清单已生成' : ''}）`,
     evidenceText: 'raw/PROVENANCE.txt · SHA256SUMS.txt · extracted/',
   })
 
@@ -1383,52 +1495,90 @@ function buildTasks(evidence, payload) {
     evidenceText: 'tools/evaluate.py · unitriad/data/omniad_adapter.py',
   })
 
-  const t5Percent = Math.min(100, Math.round((yamlConfigs / expected) * 100))
+  // T5 wants one config per dataset; the raw yaml count now includes seed and
+  // fusion variants, so measure the distinct datasets actually covered.
+  const configDatasets = new Set()
+  for (const file of configFiles) {
+    if (!/\.ya?ml$/i.test(file.p)) continue
+    const base = String(file.p).split('/').pop().replace(/\.ya?ml$/i, '')
+    for (const dataset of unified.map(name => String(name))) {
+      if (base === dataset || base.startsWith(`${dataset}_`)) {
+        configDatasets.add(dataset)
+        break
+      }
+    }
+  }
+  const t5Percent = Math.min(100, Math.round((configDatasets.size / expected) * 100))
   set('T5', {
-    status: t5Percent >= 100 ? 'done' : 'pending',
+    status: t5Percent >= 100 ? 'done' : configDatasets.size > 0 ? 'running' : 'pending',
     percent: t5Percent,
-    detail: `bench 配置 ${yamlConfigs}/${expected}${evidence.scriptBench ? ' · 本地 runner 目录已存在' : ''}`,
+    detail: `bench 配置 ${configDatasets.size}/${expected} 个数据集（共 ${yamlConfigs} 份 yaml）${evidence.scriptBench ? ' · 本地 runner 目录已存在' : ''}`,
     evidenceText: 'configs/ · scripts/bench/',
   })
 
+  const crosscheckDatasets = new Set()
+  for (const file of benchFiles) {
+    const match = /(?:^|\/)crosscheck_(.+)_(?:tA|tB)\.json$/i.exec(String(file.p))
+    if (match !== null) crosscheckDatasets.add(match[1])
+  }
+  const t6Percent = Math.min(100, Math.round((crosscheckDatasets.size / 3) * 100))
   set('T6', {
-    status: 'pending',
-    percent: 0,
-    detail: '等待在 MVTec AD / VisA / MPDD 上交叉校验指标口径',
-    evidenceText: 'anomalib / 官方 evaluate.py',
+    status: crosscheckDatasets.size >= 3 ? 'done' : crosscheckDatasets.size > 0 ? 'running' : 'pending',
+    percent: t6Percent,
+    detail: crosscheckDatasets.size > 0
+      ? `已交叉校验 ${crosscheckDatasets.size}/3 个数据集（${[...crosscheckDatasets].join(' / ')}）`
+      : '等待在 MVTec AD / VisA / MPDD 上交叉校验指标口径',
+    evidenceText: 'runs/bench13/crosscheck_*.json',
   })
 
-  const t7Percent = manifestCount > 0 ? Math.min(100, Math.round((manifestCount / datasetTarget) * 100)) : 0
+  // T7 acceptance is the end-to-end smoke on MPDD + VisA + WM-811K; manifests
+  // and per-dataset result files are the evidence that the chain produced data.
+  const smokeTargets = ['mpdd', 'visa', 'wm811k']
+  const smokeDone = smokeTargets.filter(dataset => metricByMode.tA.has(dataset) || metricByMode.tB.has(dataset)).length
+  const t7Percent = Math.round((smokeDone / smokeTargets.length) * 100)
   set('T7', {
-    status: t7Percent >= 100 ? 'done' : manifestCount > 0 ? 'running' : 'pending',
+    status: smokeDone >= smokeTargets.length ? 'done' : smokeDone > 0 || manifestCount > 0 ? 'running' : 'pending',
     percent: t7Percent,
-    detail: `manifest ${manifestCount}/${datasetTarget} · 端到端冒烟${manifestCount > 0 ? '进行中' : '未开始'}`,
-    evidenceText: 'manifests/ · metrics.json',
+    detail: `manifest ${manifestCount}/${datasetTarget} · 冒烟 ${smokeDone}/${smokeTargets.length}`,
+    evidenceText: 'manifests/ · runs/*/tA|tB/results',
   })
 
-  const t8Percent = tA > 0 ? Math.min(100, Math.round((tA / datasetTarget) * 100)) : 0
+  const t8Percent = Math.min(100, Math.round((tA / datasetTarget) * 100))
   set('T8', {
     status: t8Percent >= 100 ? 'done' : tA > 0 ? 'running' : 'pending',
     percent: t8Percent,
     detail: tA > 0 ? `T-A 结果 ${tA}/${datasetTarget} 个数据集` : 'T-A 基线未开始',
-    evidenceText: 'runs/bench13/tA_summary.csv',
+    evidenceText: 'runs/*/tA/results · runs/bench13/summary.csv',
   })
 
-  const t9Percent = tB > 0 ? Math.min(100, Math.round((tB / datasetTarget) * 100)) : 0
+  const t9Percent = Math.min(100, Math.round((tB / datasetTarget) * 100))
   set('T9', {
     status: t9Percent >= 100 ? 'done' : tB > 0 ? 'running' : 'pending',
     percent: t9Percent,
-    detail: tB > 0 ? `T-B 结果 ${tB}/${datasetTarget} 个数据集` : 'T-B 重训未开始',
-    evidenceText: 'runs/bench13/tB_summary.csv',
+    detail: tB > 0
+      ? `T-B 结果 ${tB}/${datasetTarget} 个数据集${seedDatasets.size > 0 ? ` · 3-seed 复跑 ${seedDatasets.size} 个` : ''}`
+      : 'T-B 重训未开始',
+    evidenceText: 'runs/*/tB/results · runs/bench13/summary.csv',
   })
 
-  const t10Percent = Math.min(100, Math.round((fusionFiles.length / 3) * 100))
-  set('T10', {
-    status: t10Percent >= 100 ? 'done' : fusionFiles.length > 0 ? 'running' : 'pending',
-    percent: t10Percent,
-    detail: fusionFiles.length > 0 ? `融合证据 ${fusionFiles.length} 份` : '融合 P0 未开始',
-    evidenceText: 'runs/bench13/fusion/',
-  })
+  // T10's fusion arm selection currently lives under runs/<dataset>/fuse_*|agg_*
+  // rather than runs/bench13/fusion; count both so the task is not "未开始".
+  const fusionDatasets = [...new Set(fusionRuns.map(run => String(run.dataset ?? '')).filter(Boolean))]
+  if (fusionRuns.length > 0) {
+    set('T10', {
+      status: 'running',
+      percent: null,
+      detail: `融合/聚合实验 ${fusionRuns.length} 组（${fusionDatasets.join(' / ')}）`,
+      evidenceText: 'runs/*/fuse_* · runs/*/agg_* · runs/bench13/fusion/',
+    })
+  } else {
+    set('T10', {
+      status: 'pending',
+      percent: 0,
+      detail: '融合 P0 未开始',
+      evidenceText: 'runs/bench13/fusion/',
+    })
+  }
 
   set('T11', {
     status: 'pending',
@@ -1444,10 +1594,16 @@ function buildTasks(evidence, payload) {
     evidenceText: 'runs/bench13/report.md',
   })
 
-  // A live process overrides the static state and turns its task into the
-  // current one, so the page follows work while it runs.
+  // A live process overrides the static state. The config name decides whether
+  // it belongs to the T-A baseline (T8) or the T-B track (T9); the task that
+  // owns the live process becomes the current one.
+  let liveTask = null
   for (const process of processes) {
     const args = String(process.args ?? '')
+    const configMatch = /--config\s+(\S+)/.exec(args)
+    const configName = configMatch === null ? '' : configMatch[1].split(/[\\/]/).pop()
+    const isTbConfig = /(?:^|[_-])tB(?:[_-]|\.|$)/i.test(configName)
+    const isTaConfig = /(?:^|[_-])tA(?:[_-]|\.|$)/i.test(configName)
     if (/convert_to_unified\.py/.test(args)) {
       set('T3', {
         status: 'running',
@@ -1466,26 +1622,42 @@ function buildTasks(evidence, payload) {
         percent: Math.min(99, Math.round((manifestCount / datasetTarget) * 100)),
         detail: `正在生成 manifest / 配置（已运行 ${process.etime}）`,
       })
-    } else if (/build_prototypes\.py|build_global_stats\.py|calibrate\.py|tools\/infer\.py/.test(args)) {
-      const configMatch = /--config\s+(\S+)/.exec(args)
-      const configName = configMatch === null ? '' : configMatch[1].split(/[\\/]/).pop()
-      set('T8', {
-        status: 'running',
-        percent: tA > 0 ? Math.min(95, Math.round((tA / datasetTarget) * 100)) : null,
-        detail: `T-A 原型/校准运行中${configName === '' ? '' : `（${configName}）`} · 已运行 ${process.etime}`,
-      })
     } else if (/tools\/train\.py/.test(args)) {
-      set('T9', { status: 'running', percent: 5, detail: `训练进程运行中（${process.etime}）` })
-    } else if (/tools\/evaluate\.py|run_suite/.test(args)) {
-      set('T8', { status: 'running', percent: tA > 0 ? Math.min(95, Math.round((tA / datasetTarget) * 100)) : null, detail: `T-A 批量运行/评测中（已运行 ${process.etime}）` })
+      set('T9', {
+        status: 'running',
+        percent: Math.max(1, t9Percent),
+        detail: `T-B 结果 ${tB}/${datasetTarget} · 训练进程运行中${configName === '' ? '' : `（${configName}）`} · 已运行 ${process.etime}`,
+      })
+      liveTask = 'T9'
+    } else if (/build_prototypes\.py|build_global_stats\.py|calibrate\.py|tools\/infer\.py|tools\/evaluate\.py|evaluate_large\.py|evaluate_sharded\.py|run_suite/.test(args)) {
+      if (isTbConfig) {
+        set('T9', {
+          status: 'running',
+          percent: Math.max(1, t9Percent),
+          detail: `T-B 结果 ${tB}/${datasetTarget} · 原型/推理/评测中${configName === '' ? '' : `（${configName}）`} · 已运行 ${process.etime}`,
+        })
+        liveTask = 'T9'
+      } else {
+        set('T8', {
+          status: 'running',
+          percent: t8Percent > 0 ? Math.min(99, t8Percent) : null,
+          detail: `T-A 结果 ${tA}/${datasetTarget} · 原型/校准/评测中${configName === '' ? '' : `（${configName}）`} · 已运行 ${process.etime}`,
+        })
+        liveTask = 'T8'
+      }
     }
   }
 
   const done = rows.filter(row => row.status === 'done').length
-  const runningItem = rows.find(row => row.status === 'running') ?? null
+  const runningRows = rows.filter(row => row.status === 'running')
+  const runningItem = liveTask !== null
+    ? rows.find(row => row.id === liveTask) ?? null
+    : runningRows.find(row => row.id === 'T9') ?? runningRows.find(row => row.id === 'T8') ?? runningRows[0] ?? null
   const nextItem = rows.find(row => row.status !== 'done' && row.status !== 'running') ?? null
   if (nextItem !== null) nextItem.next = true
-  const percent = Math.round(rows.reduce((sum, row) => sum + (typeof row.percent === 'number' ? row.percent : 0), 0) / Math.max(1, rows.length))
+  // Overall progress must agree with "done/total"; the previous average of the
+  // per-task percentages contradicted the 3/12 counter in the hero card.
+  const percent = Math.round((done / Math.max(1, rows.length)) * 100)
 
   return {
     plan: 'NEXT_TASKS_20261018',
@@ -1512,7 +1684,7 @@ function buildTasks(evidence, payload) {
     next: nextItem === null ? null : nextItem.id,
     running: runningItem !== null,
     datasets: { converted, verified, manifests: manifestCount, expected },
-    bench: { tA, tB, fusion: fusionFiles.length, report: reportFile !== undefined },
+    bench: { tA, tB, fusion: fusionRuns.length, report: reportFile !== undefined },
   }
 }
 
@@ -1643,6 +1815,7 @@ async function scanRemote(origin, options) {
     unifiedRoot: `${dataBase}/unified`,
     reportsRoot: `${homeBase}/docs/convert_reports`,
     manifestsRoot: `${homeBase}/manifests`,
+    altManifestsRoot: `${dataBase}/manifests`,
     benchRoot: `${options.remoteTrainingRoot.replace(/\/+$/, '')}/bench13`,
     configRoot: `${homeBase}/configs`,
     docsRoot: `${homeBase}/docs`,

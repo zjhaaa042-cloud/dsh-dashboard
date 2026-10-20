@@ -981,7 +981,9 @@ window.__ModuleLoader__.load({
     /** Prominent plan-progress banner shown above the tab tiles. */
     function TaskHero({ tasks, t, onClick }) {
       if (tasks === null || tasks === undefined || !Array.isArray(tasks.items) || tasks.items.length === 0) return null
-      const running = tasks.items.find(entry => entry.task !== undefined && entry.task.running === true)
+      const current = typeof tasks.current === 'string' ? tasks.current : null
+      const running = tasks.items.find(entry => entry.status === 'running' && entry.task !== undefined && entry.task.id === current)
+        ?? tasks.items.find(entry => entry.status === 'running')
       const next = tasks.items.find(entry => entry.task !== undefined && entry.task.next === true)
       const focus = running ?? next
       const percent = typeof tasks.percent === 'number' ? Math.max(0, Math.min(100, tasks.percent)) : 0
