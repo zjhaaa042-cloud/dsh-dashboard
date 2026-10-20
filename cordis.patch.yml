@@ -21,5 +21,13 @@
         taskPlan: ''
         # Optional per-task evidence rules, e.g. T1: { doneWhen: [...] }.
         taskRules: {}
+        # Optional low-token AI task classification through the Host llm service.
+        aiTasks:
+          enabled: false
+          intervalSeconds: 600
+          maxTokens: 500
+          reasoningEffort: off
+          provider: ''
+          model: ''
         # Seconds before the cached snapshot is rebuilt (2 = near real-time).
         refreshSeconds: 2

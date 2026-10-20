@@ -799,6 +799,9 @@ function normalizeConfig(config) {
   const raw = config !== null && typeof config === 'object' ? config : {}
   const roots = raw.remoteRoots !== null && typeof raw.remoteRoots === 'object' ? raw.remoteRoots : {}
   const tasks = raw.tasks !== null && typeof raw.tasks === 'object' && !Array.isArray(raw.tasks) ? raw.tasks : {}
+  const ai = raw.aiTasks !== null && typeof raw.aiTasks === 'object' && !Array.isArray(raw.aiTasks)
+    ? raw.aiTasks
+    : raw.ai !== null && typeof raw.ai === 'object' && !Array.isArray(raw.ai) ? raw.ai : {}
   const aliases = []
   const pushAlias = (value) => {
     if (typeof value !== 'string') return
@@ -817,6 +820,12 @@ function normalizeConfig(config) {
     refreshSeconds: number(raw.refreshSeconds, 2, 2, 300),
     taskPlan: text(raw.taskPlan ?? raw.planFile ?? tasks.plan, ''),
     taskRules: normalizeTaskRules(raw.taskRules ?? tasks.rules),
+    aiEnabled: ai.enabled === true,
+    aiIntervalSeconds: number(ai.intervalSeconds, 300, 30, 3600),
+    aiMaxTokens: number(ai.maxTokens, 500, 100, 2000),
+    aiProvider: text(ai.provider, ''),
+    aiModel: text(ai.model, ''),
+    aiReasoningEffort: text(ai.reasoningEffort, 'off'),
     showLocal: raw.showLocal !== false,
     showRemote: raw.showRemote !== false,
     remoteDownloadRoot: text(roots.downloadRoot, DEFAULT_REMOTE_ROOTS.downloadRoot),
@@ -1681,6 +1690,234 @@ async function buildTasks(evidence, payload) {
 }
 
 
+/** Compact evidence digest sent to the optional AI task classifier. */
+function aiDigest(tasks, payload) {
+  const plan = Array.isArray(tasks.items)
+    ? tasks.items.filter(item => item.kind === 'task' && item.task !== undefined).slice(0, 50).map(item => ({
+        id: item.task.id,
+        title: String(item.task.title ?? item.name).slice(0, 40),
+        status: item.status,
+      }))
+    : []
+  const processes = (Array.isArray(payload?.taskProcesses) ? payload.taskProcesses : []).slice(0, 8).map(process => ({
+    args: String(process.args ?? '').slice(0, 120),
+  }))
+  const logs = (Array.isArray(payload?.logs) ? payload.logs : []).slice(0, 8).map(entry => ({ p: entry.p, m: entry.m, s: entry.s }))
+  const artifacts = [...(Array.isArray(payload?.benchFiles) ? payload.benchFiles : []), ...(Array.isArray(payload?.docsFiles) ? payload.docsFiles : [])]
+    .slice(0, 10)
+    .map(entry => ({ p: entry.p, m: entry.m, s: entry.s }))
+  return { plan, processes, logs, artifacts }
+}
+
+/** Resolve the model route: explicit config, then the Host default. */
+async function resolveAiRoute(aiContext, options) {
+  let provider = options.aiProvider
+  let model = options.aiModel
+  if (provider !== '' && model !== '') return { provider, model }
+  try {
+    const selection = aiContext.get('agentDefaultModel')?.currentSelection?.()
+    if (selection !== null && selection !== undefined) {
+      provider = provider || String(selection.provider ?? '')
+      model = model || String(selection.model ?? '')
+    }
+  } catch {
+    /* Fall through to the gateway catalog. */
+  }
+  if (provider === '' || model === '') {
+    try {
+      const gateway = aiContext.get('typertGateway')
+      if (gateway !== undefined && typeof gateway.invoke === 'function') {
+        const catalog = await gateway.invoke({ namespace: 'session', method: 'modelCatalog', args: {} })
+        const route = catalog !== null && typeof catalog === 'object' ? catalog.default : null
+        if (route !== null && route !== undefined) {
+          provider = provider || String(route.provider ?? '')
+          model = model || String(route.model ?? '')
+        }
+      }
+    } catch {
+      /* No default route available. */
+    }
+  }
+  return provider === '' || model === '' ? null : { provider, model }
+}
+
+/** Extract the first JSON object from a model reply. */
+function extractAiReply(reply) {
+  const stripped = String(reply ?? '').replace(/```[a-zA-Z]*\s*/g, '')
+  const start = stripped.indexOf('{')
+  const end = stripped.lastIndexOf('}')
+  if (start === -1 || end <= start) return null
+  try {
+    return JSON.parse(stripped.slice(start, end + 1))
+  } catch {
+    return null
+  }
+}
+
+/** Validate model-proposed task overrides against the current plan. */
+function normalizeAiOverrides(reply, tasks) {
+  const payload = extractAiReply(reply)
+  const list = Array.isArray(payload) ? payload : Array.isArray(payload?.tasks) ? payload.tasks : []
+  const known = new Set(tasks.items.filter(item => item.kind === 'task' && item.task !== undefined).map(item => item.task.id))
+  const overrides = []
+  for (const entry of list.slice(0, 60)) {
+    if (entry === null || typeof entry !== 'object') continue
+    const id = String(entry.id ?? '').trim().toUpperCase()
+    if (!known.has(id)) continue
+    const status = entry.status === 'done' ? 'done' : entry.status === 'running' ? 'running' : entry.status === 'blocked' ? 'blocked' : 'pending'
+    const percent = typeof entry.percent === 'number' && Number.isFinite(entry.percent) ? Math.max(0, Math.min(100, Math.round(entry.percent))) : null
+    const detail = typeof entry.detail === 'string' ? entry.detail.trim().slice(0, 120) : ''
+    overrides.push({ id, status, percent, detail })
+  }
+  return overrides
+}
+
+/** Apply cached AI overrides and recompute the board summary. */
+function applyAiOverrides(tasks, overrides, aiState) {
+  if (tasks === null || tasks === undefined) return tasks
+  if (!Array.isArray(overrides) || overrides.length === 0) return tasks
+  const byId = new Map(overrides.map(entry => [entry.id, entry]))
+  const items = tasks.items.map(item => {
+    if (item.kind !== 'task' || item.task === undefined) return item
+    return { ...item, task: { ...item.task, next: false } }
+  })
+  for (const item of items) {
+    if (item.kind !== 'task' || item.task === undefined) continue
+    const override = byId.get(item.task.id)
+    if (override === undefined) continue
+    if (item.status === 'done' && override.status !== 'done') continue
+    item.status = override.status
+    item.task.percent = override.status === 'done' ? 100 : override.percent ?? item.task.percent
+    item.task.ai = true
+    item.task.aiDetail = override.detail
+    if (override.detail !== '') item.detail = override.detail
+  }
+  const taskItems = items.filter(item => item.kind === 'task')
+  const done = taskItems.filter(item => item.status === 'done').length
+  const running = taskItems.filter(item => item.status === 'running')
+  const nextItem = taskItems.find(item => item.status === 'pending') ?? null
+  if (nextItem !== null) nextItem.task.next = true
+  return {
+    ...tasks,
+    items,
+    done,
+    total: taskItems.length,
+    percent: Math.round((done / Math.max(1, taskItems.length)) * 100),
+    current: running.length > 0 ? running[0].task.id : null,
+    next: nextItem === null ? null : nextItem.task.id,
+    running: running.length > 0,
+    ai: {
+      enabled: true,
+      at: aiState.at,
+      model: aiState.model,
+      error: aiState.error,
+      pending: aiState.inflight,
+      count: overrides.length,
+    },
+  }
+}
+
+/** Run one low-token AI classification pass. */
+async function runAiTaskInference(aiContext, options, tasks, digest) {
+  const state = aiContext.state
+  const llm = aiContext.get('llm')
+  if (llm === undefined || llm === null) throw new Error('llm service unavailable')
+  const route = await resolveAiRoute(aiContext, options)
+  if (route === null) throw new Error('no model route')
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 30000)
+  try {
+    const prompt = [
+      'You maintain a project task board. Use only the plan and evidence below; do not invent tasks.',
+      'Return ONLY JSON: {"tasks":[{"id":"<plan id>","status":"done|running|pending|blocked","percent":0-100,"detail":"<=60 chars"}]}',
+      'Only include tasks whose inferred state differs from its PLAN status; omit unchanged tasks. Keep ids exact. No prose.',
+      `PLAN=${JSON.stringify(digest.plan)}`,
+      `EVIDENCE=${JSON.stringify({ processes: digest.processes, logs: digest.logs, artifacts: digest.artifacts })}`,
+    ].join('\n')
+    const request = {
+      provider: route.provider,
+      model: route.model,
+      system: 'You are a terse task-state classifier. Output JSON only.',
+      messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
+      maxTokens: options.aiMaxTokens,
+      temperature: 0,
+      signal: controller.signal,
+    }
+    if (options.aiReasoningEffort !== '') request.reasoningEffort = options.aiReasoningEffort
+    let stream
+    if (typeof llm.stream === 'function') {
+      stream = llm.stream(request)
+    } else {
+      const prepared = await llm.prepareCall({ provider: route.provider, model: route.model }, controller.signal)
+      stream = prepared.stream({ ...prepared.config, system: request.system, messages: request.messages, signal: controller.signal })
+    }
+    let reply = ''
+    let usage = null
+    for await (const chunk of stream) {
+      if (chunk.type === 'text-delta') reply += chunk.text
+      else if (chunk.type === 'usage') usage = chunk.usage
+      else if (chunk.type === 'finish' && (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted')) {
+        throw new Error(chunk.reason.failure?.message ?? 'model call failed')
+      }
+    }
+    state.overrides = normalizeAiOverrides(reply, tasks)
+    state.model = `${route.provider}/${route.model}`
+    state.usage = usage
+    state.reply = reply.slice(0, 1200)
+    state.error = null
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * Apply cached AI results and, when the compact evidence fingerprint changes,
+ * start one background classification pass. The snapshot never waits for the
+ * model; the next 2 s poll picks up the new overrides.
+ */
+function maybeAiTasks(aiContext, options, tasks, payload) {
+  if (!options.aiEnabled || aiContext === null || tasks === null || tasks === undefined) return tasks
+  const state = aiContext.state
+  const digest = aiDigest(tasks, payload)
+  const fingerprint = JSON.stringify(digest)
+  let result = applyAiOverrides(tasks, state.overrides, state)
+  result = {
+    ...result,
+    ai: {
+      enabled: true,
+      at: state.at,
+      model: state.model,
+      error: state.error,
+      pending: state.inflight,
+      count: state.overrides.length,
+      usage: state.usage,
+    },
+  }
+  if (state.fingerprint === fingerprint) {
+    if (state.error === null || Date.now() - state.at < options.aiIntervalSeconds * 1000) return result
+  }
+  if (state.inflight) return result
+  if (state.fingerprint !== '' && Date.now() - state.at < options.aiIntervalSeconds * 1000) return result
+  const llm = aiContext.get('llm')
+  if (llm === undefined || llm === null) {
+    state.error = 'llm service unavailable'
+    return result
+  }
+  state.fingerprint = fingerprint
+  state.at = Date.now()
+  state.inflight = true
+  void runAiTaskInference(aiContext, options, tasks, digest)
+    .catch(error => {
+      state.error = error instanceof Error ? error.message : String(error)
+    })
+    .finally(() => {
+      state.inflight = false
+    })
+  return result
+}
+
+/** Send one command to the remote host through dsh-ssh's loopback exec route. */
+
 /** Send one command to the remote host through dsh-ssh's loopback exec route. */
 
 async function execRemote(origin, alias, command, timeoutMs) {
@@ -2126,7 +2363,7 @@ function buildTransferItems(staging, remoteTransfers) {
  * Build one full snapshot. Local and remote failures are reported per side so a
  * down server never hides the local project state (and the reverse).
  */
-async function buildSnapshot(webServer, options) {
+async function buildSnapshot(webServer, options, aiContext = null) {
   const startedAt = Date.now()
   const maxItems = LIMITS.maxItemsPerSection
   const snapshot = {
@@ -2217,6 +2454,7 @@ async function buildSnapshot(webServer, options) {
     },
   }
   snapshot.tasks = await buildTasks(await scanTaskEvidence(options.localRoot, options), remotePayload)
+  snapshot.tasks = maybeAiTasks(aiContext, options, snapshot.tasks, remotePayload)
 
   latestRemoteTransfers = remoteTransfers
   if (latestStaging === null) latestStaging = await readStagingTransfers()
@@ -2252,13 +2490,32 @@ export function apply(ctx, config) {
   let snapshot = null
   let inflight = null
   let inflightAt = 0
+  const aiContext = {
+    get(name) {
+      try {
+        return ctx.get(name)
+      } catch {
+        return undefined
+      }
+    },
+    state: {
+      fingerprint: '',
+      at: 0,
+      inflight: false,
+      overrides: [],
+      error: null,
+      model: '',
+      usage: null,
+      reply: '',
+    },
+  }
 
   const refresh = (force) => {
     const fresh = snapshot !== null && Date.now() - snapshot.generatedAt < options.refreshSeconds * 1000
     if (!force && fresh) return Promise.resolve(snapshot)
     if (inflight !== null) return inflight
     inflightAt = Date.now()
-    inflight = buildSnapshot(ctx.webServer, options)
+    inflight = buildSnapshot(ctx.webServer, options, aiContext)
       .then(result => {
         snapshot = result
         return result
@@ -2372,6 +2629,38 @@ export function apply(ctx, config) {
     },
   }
 
+  const aiModels = {
+    kind: 'exact',
+    path: '/api/dino-dashboard/ai-models',
+    handler: async (request, response) => {
+      if (!isLoopbackRequest(request)) return writeJson(response, 403, { error: 'forbidden: loopback-only' })
+      if (request.method !== 'GET') return writeJson(response, 405, { error: 'method not allowed' })
+      const llm = typeof ctx.get === 'function' ? ctx.get('llm') : undefined
+      if (llm === undefined || llm === null) return writeJson(response, 503, { error: 'llm service unavailable' })
+      try {
+        const providers = []
+        for (const provider of await llm.listProviders()) {
+          const models = await llm.listModels(provider.id).catch(() => [])
+          const detailed = []
+          for (const model of models) {
+            let info = null
+            try {
+              const resolved = await llm.resolveModelInfo(provider.id, model.id)
+              info = { reasoning: resolved.reasoning ?? null, context: resolved.context ?? null, defaultMaxTokens: resolved.defaultMaxTokens ?? null }
+            } catch {
+              info = null
+            }
+            detailed.push({ id: model.id, name: model.name, info })
+          }
+          providers.push({ provider: provider.id, name: provider.name, models: detailed })
+        }
+        return writeJson(response, 200, { providers })
+      } catch (error) {
+        return writeJson(response, 500, { error: error instanceof Error ? error.message : String(error) })
+      }
+    },
+  }
+
   const refreshStaging = () => {
     readStagingTransfers().then(value => { latestStaging = value }).catch(() => {})
   }
@@ -2382,7 +2671,7 @@ export function apply(ctx, config) {
   }, 'dino-dashboard: transfer tracker')
 
   ctx.effect(() => {
-    const disposers = [state, force, transfers, clearTransfers, detail].map(route => ctx.webServer.register(route))
+    const disposers = [state, force, transfers, clearTransfers, detail, aiModels].map(route => ctx.webServer.register(route))
     return () => {
       for (const dispose of disposers) dispose()
     }
