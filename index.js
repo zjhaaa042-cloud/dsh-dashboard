@@ -1371,8 +1371,7 @@ async function scanLocal(root) {
   return { downloads, training, tests }
 }
 
-/** Plan fallback when the local research document is missing or unparseable. */
-﻿/** Normalize one rule list (string or array of strings). */
+/** Normalize one rule list (string or array of strings). */
 function ruleList(value) {
   if (typeof value === 'string') return value.trim() === '' ? [] : [value.trim()]
   if (!Array.isArray(value)) return []
@@ -1398,7 +1397,13 @@ function parseTaskPlan(text) {
       title,
       type: String(row.type ?? '').trim(),
       estimate: String(row.estimate ?? '').trim(),
-      status: row.status === 'done' ? 'done' : row.status === 'running' ? 'running' : 'pending',
+      deliverable: String(row.deliverable ?? '').trim(),
+      steps: String(row.steps ?? '').trim(),
+      acceptance: String(row.acceptance ?? '').trim(),
+      dependencies: String(row.dependencies ?? '').trim(),
+      owner: String(row.owner ?? '').trim(),
+      scope: String(row.scope ?? '').trim(),
+      status: row.status === 'done' ? 'done' : row.status === 'running' ? 'running' : row.status === 'blocked' ? 'blocked' : 'pending',
       percent: typeof row.percent === 'number' ? Math.max(0, Math.min(100, row.percent)) : null,
     })
   }
@@ -1423,6 +1428,12 @@ function parseTaskPlan(text) {
             estimate: lowered.findIndex(cell => /^(estimate|估算|预计|耗时|工期)$/.test(cell)),
             status: lowered.findIndex(cell => /^(status|状态)$/.test(cell)),
             percent: lowered.findIndex(cell => /^(percent|progress|进度|完成度)$/.test(cell)),
+            deliverable: lowered.findIndex(cell => /^(deliverable|output|artifact|产出)$/.test(cell)),
+            steps: lowered.findIndex(cell => /^(steps|how|关键步骤|步骤)$/.test(cell)),
+            acceptance: lowered.findIndex(cell => /^(acceptance|criteria|验收)$/.test(cell)),
+            dependencies: lowered.findIndex(cell => /^(dependencies|depends|依赖)$/.test(cell)),
+            owner: lowered.findIndex(cell => /^(owner|assignee|负责)$/.test(cell)),
+            scope: lowered.findIndex(cell => /^(scope|paths|写作用域|作用域)$/.test(cell)),
           }
           continue
         }
@@ -1438,11 +1449,18 @@ function parseTaskPlan(text) {
         title: cells[header.title] ?? '',
         type: header.type >= 0 ? cells[header.type] ?? '' : '',
         estimate: header.estimate >= 0 ? cells[header.estimate] ?? '' : '',
+        deliverable: header.deliverable >= 0 ? cells[header.deliverable] ?? '' : '',
+        steps: header.steps >= 0 ? cells[header.steps] ?? '' : '',
+        acceptance: header.acceptance >= 0 ? cells[header.acceptance] ?? '' : '',
+        dependencies: header.dependencies >= 0 ? cells[header.dependencies] ?? '' : '',
+        owner: header.owner >= 0 ? cells[header.owner] ?? '' : '',
+        scope: header.scope >= 0 ? cells[header.scope] ?? '' : '',
       }
       if (header.status >= 0) {
         const status = String(cells[header.status] ?? '').toLowerCase()
-        if (/(done|complete|已完成|完成)/.test(status)) values.status = 'done'
-        else if (/(running|进行中|进行)/.test(status)) values.status = 'running'
+        if (/(done|complete|已完成|完成|✅|✔|☑)/.test(status)) values.status = 'done'
+        else if (/(running|进行中|进行|🟡|🟠|🔵)/.test(status)) values.status = 'running'
+        else if (/(blocked|阻塞|⛔|🚫)/.test(status)) values.status = 'blocked'
       }
       if (header.percent >= 0) {
         const match = /(\d{1,3})\s*%?/.exec(String(cells[header.percent] ?? ''))
@@ -1469,12 +1487,45 @@ function parseTaskPlan(text) {
   return rows
 }
 
+/** Find the newest Markdown task/plan file under `docs/`. */
+async function findLatestPlan(root) {
+  const candidates = []
+  const walk = async (dir, depth) => {
+    if (depth > 3) return
+    const entries = await listSafe(dir, 200)
+    for (const entry of entries) {
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        await walk(full, depth + 1)
+        continue
+      }
+      if (!/\.md$/i.test(entry.name)) continue
+      if (!/(?:task[_\- ]*plan|next[_\- ]*tasks|plan[_\- ]*tasks)/i.test(entry.name)) continue
+      const info = await statSafe(full)
+      candidates.push({ path: full, mtime: info?.mtimeMs ?? 0 })
+    }
+  }
+  try {
+    await walk(join(root, 'docs'), 0)
+  } catch {
+    return null
+  }
+  candidates.sort((left, right) => right.mtime - left.mtime)
+  return candidates.length > 0 ? candidates[0].path : null
+}
+
 /** Read the configured plan file; no plan means the tab stays empty. */
 async function scanTaskEvidence(root, options) {
   const setting = typeof options?.taskPlan === 'string' ? options.taskPlan.trim() : ''
   const rules = options?.taskRules !== null && typeof options?.taskRules === 'object' ? options.taskRules : {}
   if (setting === '') return { rows: [], plan: '', root, rules }
-  const planPath = isAbsolute(setting) ? setting : join(root, setting)
+  let planPath = null
+  if (setting.toLowerCase() === 'auto') {
+    planPath = await findLatestPlan(root)
+  } else {
+    planPath = isAbsolute(setting) ? setting : join(root, setting)
+  }
+  if (planPath === null) return { rows: [], plan: '', root, rules }
   try {
     const text = await readFile(planPath, 'utf8')
     return { rows: parseTaskPlan(text), plan: basename(planPath), root, rules }
@@ -1526,7 +1577,7 @@ async function buildTasks(evidence, payload) {
   if (evidence === null || evidence === undefined || !Array.isArray(evidence.rows) || evidence.rows.length === 0) return null
   const rows = evidence.rows.map(row => ({
     ...row,
-    status: row.status === 'done' ? 'done' : row.status === 'running' ? 'running' : 'pending',
+    status: row.status === 'done' ? 'done' : row.status === 'running' ? 'running' : row.status === 'blocked' ? 'blocked' : 'pending',
     percent: typeof row.percent === 'number' ? row.percent : row.status === 'done' ? 100 : 0,
     detail: '',
     evidenceText: '',
@@ -1569,6 +1620,12 @@ async function buildTasks(evidence, payload) {
       row.evidenceText = [...doneAll, ...doneAny, ...runningList].join(' · ')
       continue
     }
+    if (row.status === 'blocked') {
+      row.percent = 0
+      row.detail = '阻塞'
+      row.evidenceText = [...doneAll, ...doneAny, ...runningList].join(' · ')
+      continue
+    }
     const match = runningList.length === 0 ? null : processes.find((process) => {
       const args = String(process.args ?? '').toLowerCase()
       return runningList.some(token => args.includes(token.toLowerCase()))
@@ -1587,7 +1644,7 @@ async function buildTasks(evidence, payload) {
   }
   const done = rows.filter(row => row.status === 'done').length
   const runningRows = rows.filter(row => row.status === 'running')
-  const nextItem = rows.find(row => row.status !== 'done' && row.status !== 'running') ?? null
+  const nextItem = rows.find(row => row.status !== 'done' && row.status !== 'running' && row.status !== 'blocked') ?? null
   if (nextItem !== null) nextItem.next = true
   return {
     plan: evidence.plan ?? '',
@@ -1600,8 +1657,15 @@ async function buildTasks(evidence, payload) {
       detail: row.detail,
       task: {
         id: row.id,
+        title: row.title,
         type: row.type,
         estimate: row.estimate,
+        deliverable: row.deliverable,
+        steps: row.steps,
+        acceptance: row.acceptance,
+        dependencies: row.dependencies,
+        owner: row.owner,
+        scope: row.scope,
         percent: row.percent,
         next: row.next === true,
         evidence: row.evidenceText,

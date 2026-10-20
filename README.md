@@ -39,7 +39,7 @@ config:
     trainingRoot: '/data/runs'
     logRoot: '/data/logs'
     benchRoot: '/data/runs/bench'    # 可选：bench 汇总目录
-  taskPlan: 'docs/TASKS.md'          # 可选：任务计划；留空则任务页签为空
+  taskPlan: 'docs/TASKS.md'          # 可选：任务计划；'auto' 自动选 docs 下最新任务文件；留空则任务页签为空
   taskRules:                         # 可选：任务证据规则（相对 localRoot 或远端文件后缀）
     T1:
       doneWhen: ['raw/PROVENANCE.txt', 'raw/SHA256SUMS.txt']  # 全部存在才完成
@@ -52,7 +52,7 @@ config:
 
 `remoteAlias` 同时是项目数据（下载/训练/测试/任务）的主机来源；`remoteAliases` 里的额外主机只聚合 GPU 与主机资源。可选键：`showLocal`、`showRemote`（布尔）。
 
-任务计划支持两种写法（`taskPlan` 为空时不扫描、不显示任何任务）：
+任务计划支持两种写法（`taskPlan` 为空时不扫描、不显示任何任务；设为 `auto` 时会自动选择 `docs/` 下最新的 `TASK_PLAN*.md` / `NEXT_TASKS*.md`）：
 
 ```markdown
 | ID | 标题 | 类型 | 估算 | 状态 |
@@ -69,6 +69,8 @@ config:
 ```
 
 `doneWhen` / `doneWhenAny` 支持相对路径、`*` 通配符，匹配本地文件或远端探测到的文件列表；`runningWhen` 匹配远端进程命令行。
+
+状态列支持 `✅/完成`（已完成）、`🟡/进行中`（进行中）、`⛔/阻塞`（阻塞）、`⬜/待开始`（待开始）。表格里的「产出 / 关键步骤 / 验收 / 依赖 / 负责 / 写作用域」列会一并保留，点击任务行可在详情抽屉查看。
 
 仓库里的 `cordis.patch.yml` 只保留空配置；本机实际使用的路径、SSH 别名等建议写在 **profile 的 `cordis.patch.yml`** 覆盖层（同 id 覆盖），这样仓库里不会出现个人路径。
 

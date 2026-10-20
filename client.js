@@ -68,6 +68,7 @@ window.__ModuleLoader__.load({
       'status.failed': '失败',
       'status.done': '已完成',
       'status.pending': '待开始',
+      'status.blocked': '阻塞',
       'status.info': '信息',
       'task.heroLabel': '任务进度',
       'task.nextTag': '下一步',
@@ -158,6 +159,12 @@ window.__ModuleLoader__.load({
       'detail.copyPath': '复制路径',
       'detail.metrics': '指标',
       'detail.taskInfo': '任务说明',
+      'detail.deliverable': '产出',
+      'detail.steps': '关键步骤',
+      'detail.acceptance': '验收',
+      'detail.dependencies': '依赖',
+      'detail.owner': '负责',
+      'detail.scope': '写作用域',
       'detail.evidence': '判断依据',
       'detail.estimate': '预计',
       'detail.direction': '方向',
@@ -212,6 +219,7 @@ window.__ModuleLoader__.load({
       'status.failed': 'Failed',
       'status.done': 'Done',
       'status.pending': 'Pending',
+      'status.blocked': 'Blocked',
       'status.info': 'Info',
       'task.heroLabel': 'Task progress',
       'task.nextTag': 'Next',
@@ -302,6 +310,12 @@ window.__ModuleLoader__.load({
       'detail.copyPath': 'Copy path',
       'detail.metrics': 'Metrics',
       'detail.taskInfo': 'Task',
+      'detail.deliverable': 'Deliverable',
+      'detail.steps': 'Steps',
+      'detail.acceptance': 'Acceptance',
+      'detail.dependencies': 'Depends on',
+      'detail.owner': 'Owner',
+      'detail.scope': 'Scope',
       'detail.evidence': 'Evidence',
       'detail.estimate': 'Estimate',
       'detail.direction': 'Direction',
@@ -651,7 +665,7 @@ window.__ModuleLoader__.load({
       const stamp = item.mtime > 0 ? relativeTime(item.mtime, t) : ''
       const absolute = item.mtime > 0 ? formatTime(item.mtime) : ''
       const statusText = isTask
-        ? item.status === 'done' ? t('status.done') : item.status === 'pending' ? t('status.pending') : t('status.running')
+        ? item.status === 'done' ? t('status.done') : item.status === 'pending' ? t('status.pending') : item.status === 'blocked' ? t('status.blocked') : t('status.running')
         : isTransfer
           ? item.status === 'done' ? t('status.done') : t('status.running')
           : item.kind === 'extract' && item.status === 'running'
@@ -749,13 +763,14 @@ window.__ModuleLoader__.load({
 
     /** Localized status for the drawer. */
     function statusLabel(item, t) {
-      if (item.kind === 'task') return item.status === 'done' ? t('status.done') : item.status === 'pending' ? t('status.pending') : t('status.running')
+      if (item.kind === 'task') return item.status === 'done' ? t('status.done') : item.status === 'pending' ? t('status.pending') : item.status === 'blocked' ? t('status.blocked') : t('status.running')
       if (item.kind === 'transfer') return item.status === 'done' ? t('status.done') : t('status.running')
       if (item.kind === 'extract' && item.status === 'running') return t('status.extracting')
       if (item.status === 'running') return t('status.running')
       if (item.status === 'failed') return t('status.failed')
       if (item.status === 'passed') return t('status.passed')
       if (item.status === 'done') return t('status.done')
+      if (item.status === 'blocked') return t('status.blocked')
       return t('status.info')
     }
 
@@ -800,6 +815,12 @@ window.__ModuleLoader__.load({
         ? [
             meta(t('detail.taskInfo'), `${item.task.id ?? ''} ${item.task.title ?? ''}`.trim()),
             typeof item.task.percent === 'number' ? meta(t('detail.status'), `${item.task.percent}%`) : null,
+            typeof item.task.deliverable === 'string' && item.task.deliverable !== '' ? meta(t('detail.deliverable'), item.task.deliverable) : null,
+            typeof item.task.steps === 'string' && item.task.steps !== '' ? meta(t('detail.steps'), item.task.steps) : null,
+            typeof item.task.acceptance === 'string' && item.task.acceptance !== '' ? meta(t('detail.acceptance'), item.task.acceptance) : null,
+            typeof item.task.dependencies === 'string' && item.task.dependencies !== '' ? meta(t('detail.dependencies'), item.task.dependencies) : null,
+            typeof item.task.owner === 'string' && item.task.owner !== '' ? meta(t('detail.owner'), item.task.owner) : null,
+            typeof item.task.scope === 'string' && item.task.scope !== '' ? meta(t('detail.scope'), item.task.scope) : null,
             typeof item.task.evidence === 'string' && item.task.evidence !== '' ? meta(t('detail.evidence'), item.task.evidence) : null,
             typeof item.task.estimate === 'string' && item.task.estimate !== '' ? meta(t('detail.estimate'), item.task.estimate) : null,
           ].filter(Boolean)
@@ -1548,6 +1569,7 @@ window.__ModuleLoader__.load({
       '.dd-row-pill-done{color:var(--dsw-alias-state-success-primary)}',
       '.dd-row-pill-pending{color:var(--dsw-alias-label-secondary)}',
       '.dd-row-pill-failed{color:var(--dsw-alias-state-error-primary)}',
+      '.dd-row-pill-blocked{color:var(--dsw-alias-state-warn-primary)}',
       '.dd-row-size{color:var(--dsw-alias-label-secondary)}',
       '.dd-row-time{color:var(--dsw-alias-label-secondary)}',
       '.dd-row-copy{display:grid;place-items:center;color:var(--dsw-alias-label-secondary);opacity:0;transition:opacity .12s}',
