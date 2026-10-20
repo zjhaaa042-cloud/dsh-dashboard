@@ -987,6 +987,8 @@ let lastLocalCpu = null
 const remoteCpuState = new Map()
 /** Rolling per-GPU utilization/memory history (newest last, ~30 samples). */
 const gpuHistory = new Map()
+/** Download write progress keyed by source:path. */
+const downloadProgress = new Map()
 /** dsh-ssh staging files currently seen, keyed by staging file name. */
 const stagingTransfers = new Map()
 /** Recently finished staging transfers. */
@@ -1127,6 +1129,58 @@ async function readStagingTransfers() {
 function isPartialName(name) {
   const lowered = String(name).toLowerCase()
   return PARTIAL_SUFFIXES.some(suffix => lowered.endsWith(suffix))
+}
+
+/** Drop duplicate download rows (a partial listed as both a file and a partial). */
+function dedupeDownloadItems(items) {
+  const map = new Map()
+  for (const item of items) {
+    const key = `${item.source}:${item.path}`
+    const existing = map.get(key)
+    if (existing === undefined || (existing.status !== 'running' && item.status === 'running')) map.set(key, item)
+  }
+  return [...map.values()]
+}
+
+/** Track download size growth/rate and stall state across snapshots. */
+function trackDownloadProgress(items) {
+  const now = Date.now()
+  const active = new Set()
+  for (const item of items) {
+    if (item.kind !== 'file' || item.status !== 'running') continue
+    const key = `${item.source}:${item.path}`
+    active.add(key)
+    const mtime = typeof item.mtime === 'number' ? item.mtime : 0
+    let entry = downloadProgress.get(key)
+    if (entry === undefined) {
+      entry = { size: item.size, lastAt: now, lastChangeAt: mtime > 0 ? mtime : now, startedAt: now, rate: null }
+      downloadProgress.set(key, entry)
+    } else {
+      const elapsed = Math.max(1, now - entry.lastAt)
+      const delta = item.size - entry.size
+      if (delta > 0) {
+        entry.rate = (delta / elapsed) * 1000
+        entry.lastChangeAt = now
+      } else if (now - entry.lastChangeAt > 60000) {
+        entry.rate = 0
+      }
+      entry.size = item.size
+      entry.lastAt = now
+    }
+    if (mtime > entry.lastChangeAt) entry.lastChangeAt = mtime
+    item.progress = {
+      size: item.size,
+      rate: entry.rate,
+      observedMs: now - entry.startedAt,
+      stalledForMs: Math.max(0, now - entry.lastChangeAt),
+      stalled: now - entry.lastChangeAt > 90000,
+      percent: null,
+    }
+  }
+  for (const key of downloadProgress.keys()) {
+    if (!active.has(key)) downloadProgress.delete(key)
+  }
+  return items
 }
 
 /** Sum a directory's file sizes with hard entry/depth caps (never unbounded). */
@@ -2085,6 +2139,7 @@ function mapRemote(payload, maxItems, options) {
   const host = typeof payload.host === 'string' ? payload.host : ''
 
   const downloadEntries = Array.isArray(payload.downloads) ? payload.downloads : []
+  const partialNames = new Set((Array.isArray(payload.partials) ? payload.partials : []).map(entry => String(entry.p ?? '')))
   const extractionNames = new Set((Array.isArray(payload.extraction) ? payload.extraction : []).map(group => String(group.dataset ?? '')).filter(Boolean))
   const fileNames = new Set(downloadEntries.filter(entry => entry.dir !== true).map(entry => String(entry.p ?? '')))
   for (const entry of downloadEntries) {
@@ -2100,6 +2155,7 @@ function mapRemote(payload, maxItems, options) {
       if ([...fileNames].some(file => file.startsWith(prefix))) continue
     }
     const partial = isPartialName(name)
+    if (partial && partialNames.has(name)) continue
     downloads.push(item({
       kind: isDir ? 'dir' : 'file',
       name,
@@ -2460,7 +2516,8 @@ async function buildSnapshot(webServer, options, aiContext = null) {
   if (latestStaging === null) latestStaging = await readStagingTransfers()
   snapshot.transfers = buildTransferItems(latestStaging, remoteTransfers)
 
-  const downloads = newest([...local.downloads, ...(remote?.downloads ?? [])], maxItems)
+  const downloads = dedupeDownloadItems(newest([...local.downloads, ...(remote?.downloads ?? [])], maxItems))
+  trackDownloadProgress(downloads)
   const training = selectTraining([...local.training, ...(remote?.training ?? [])], maxItems)
   const tests = selectTests([...local.tests, ...(remote?.tests ?? [])], maxItems)
 

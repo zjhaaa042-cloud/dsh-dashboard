@@ -87,6 +87,9 @@ window.__ModuleLoader__.load({
       'detail.remoteDirectory': '服务器目录',
       'detail.remoteDownload': '服务器文件',
       'detail.remotePartial': '下载中临时文件',
+      'detail.downloading': '已下载 {size}{rate} · 已观察 {elapsed}',
+      'detail.downloadRate': ' · {value}/s',
+      'detail.downloadStalled': '已下载 {size} · 停滞（{elapsed} 未增长）',
       'detail.run': '产物：{list}',
       'detail.runEmpty': '暂无训练产物',
       'detail.remoteRun': '服务端产物：{list}',
@@ -105,6 +108,7 @@ window.__ModuleLoader__.load({
       'status.extracting': '解压中',
       'tag.extract': '解压',
       'tag.ai': 'AI',
+      'tag.stalled': '停滞',
       'transfer.upload': '上传',
       'transfer.download': '下载',
       'transfer.remote': '远端',
@@ -242,6 +246,9 @@ window.__ModuleLoader__.load({
       'detail.remoteDirectory': 'Server directory',
       'detail.remoteDownload': 'Server file',
       'detail.remotePartial': 'Partial download',
+      'detail.downloading': 'Downloaded {size}{rate} · observed {elapsed}',
+      'detail.downloadRate': ' · {value}/s',
+      'detail.downloadStalled': 'Downloaded {size} · stalled ({elapsed} without growth)',
       'detail.run': 'Artifacts: {list}',
       'detail.runEmpty': 'No training artifacts yet',
       'detail.remoteRun': 'Server artifacts: {list}',
@@ -260,6 +267,7 @@ window.__ModuleLoader__.load({
       'status.extracting': 'Extracting',
       'tag.extract': 'Extract',
       'tag.ai': 'AI',
+      'tag.stalled': 'Stalled',
       'transfer.upload': 'Upload',
       'transfer.download': 'Download',
       'transfer.remote': 'Remote',
@@ -531,6 +539,9 @@ window.__ModuleLoader__.load({
 
     /** Resolve a localized detail line for one item. */
     function itemDetail(item, t) {
+      if (item.kind === 'file' && item.status === 'running' && item.progress !== undefined && item.progress !== null) {
+        return downloadProgressDetail(item, t)
+      }
       if (item.kind === 'pytest') {
         const counts = item.counts ?? {}
         const parts = []
@@ -550,6 +561,16 @@ window.__ModuleLoader__.load({
       }
       if (typeof item.detailKey === 'string' && item.detailKey !== '') return t(item.detailKey)
       return ''
+    }
+
+    /** One-line download progress (bytes, rate, observed time, stall state). */
+    function downloadProgressDetail(item, t) {
+      const progress = item.progress ?? {}
+      const size = formatBytes(progress.size ?? item.size ?? 0)
+      const elapsed = formatDuration(progress.observedMs ?? 0)
+      if (progress.stalled === true) return fmt(t, 'detail.downloadStalled', { size, elapsed: formatDuration(progress.stalledForMs ?? 0) })
+      const rate = typeof progress.rate === 'number' && progress.rate > 0 ? fmt(t, 'detail.downloadRate', { value: formatBytes(progress.rate) }) : ''
+      return fmt(t, 'detail.downloading', { size, rate, elapsed })
     }
 
     /** Human duration for transfer rows. */
@@ -691,6 +712,7 @@ window.__ModuleLoader__.load({
       ].filter(Boolean).join('\n')
       const rowClass = `dd-row${item.status === 'failed' ? ' dd-row-failed' : item.status === 'running' ? ' dd-row-running' : ''}${isTask && item.task.next === true ? ' dd-row-next' : ''}`
       const extracting = item.kind === 'extract' && item.extract !== null && item.extract !== undefined && typeof item.extract.percent === 'number' && item.extract.state !== 'done'
+      const downloading = item.kind === 'file' && item.status === 'running' && item.progress !== undefined && item.progress !== null
       const taskBar = isTask && typeof item.task.percent === 'number' && item.task.percent > 0 && item.task.percent < 100
       return h('div', {
         role: 'button',
@@ -713,6 +735,7 @@ window.__ModuleLoader__.load({
             item.kind === 'extract' ? h('span', { key: 'kind', className: 'dd-tag dd-tag-extract' }, t('tag.extract')) : null,
             isTransfer && transferInfo !== null ? h('span', { key: 'direction', className: 'dd-tag dd-tag-transfer' }, `${transferInfo.arrow} ${transferInfo.label}`) : null,
             isTask && item.task.ai === true ? h('span', { key: 'ai', className: 'dd-tag dd-tag-ai', title: item.task.aiDetail ?? '' }, t('tag.ai')) : null,
+            downloading && item.progress.stalled === true ? h('span', { key: 'stalled', className: 'dd-tag dd-tag-stalled' }, t('tag.stalled')) : null,
             item.tag ? h('span', { key: 'tag', className: 'dd-tag', title: item.tag }, item.tag) : null,
           ]),
           h('span', { key: 'meta', className: 'dd-row-meta' }, meta),
@@ -724,6 +747,15 @@ window.__ModuleLoader__.load({
             : null,
           isTransfer && item.status === 'running'
             ? h('span', { key: 'transferbar', className: 'dd-row-bar dd-row-bar-active' }, h('span', { className: 'dd-row-fill' }))
+            : null,
+          downloading
+            ? h('span', {
+                key: 'downloadbar',
+                className: `dd-row-bar${item.progress.percent === null || item.progress.percent === undefined ? ' dd-row-bar-active' : ''}${item.progress.stalled === true ? ' dd-row-bar-stalled' : ''}`,
+              }, h('span', {
+                className: 'dd-row-fill',
+                style: item.progress.percent === null || item.progress.percent === undefined ? undefined : { width: `${item.progress.percent}%` },
+              }))
             : null,
         ]),
         h('span', { key: 'side', className: 'dd-row-side' }, [
@@ -1572,12 +1604,14 @@ window.__ModuleLoader__.load({
       '.dd-tag-extract{color:var(--dsw-alias-brand-primary)}',
       '.dd-tag-transfer{color:var(--dsw-alias-brand-primary)}',
       '.dd-tag-ai{color:var(--dsw-alias-brand-primary);border:1px solid var(--dsw-alias-brand-primary);border-radius:4px;padding:0 3px}',
+      '.dd-tag-stalled{color:var(--dsw-alias-state-warn-primary);border:1px solid var(--dsw-alias-state-warn-primary);border-radius:4px;padding:0 3px}',
       '.dd-tag-next{color:var(--dsw-alias-label-primary);border:1px solid var(--dsw-alias-brand-primary);background:var(--dsw-alias-bg-base)}',
       '.dd-row-next{box-shadow:inset 3px 0 0 var(--dsw-alias-brand-primary)}',
       '.dd-row-meta{font-size:12.5px;color:var(--dsw-alias-label-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.4}',
       '.dd-row-bar{display:block;height:4px;margin-top:3px;border-radius:2px;background:var(--dsw-alias-bg-layer-2);overflow:hidden}',
       '.dd-row-fill{display:block;height:100%;border-radius:2px;background:var(--dsw-alias-brand-primary);transition:width .4s ease}',
       '.dd-row-bar-active .dd-row-fill{width:35%;animation:dd-transfer 1.1s ease-in-out infinite alternate}',
+      '.dd-row-bar-stalled .dd-row-fill{animation:none;width:100%;opacity:.35}',
       '@keyframes dd-transfer{from{transform:translateX(0);opacity:.45}to{transform:translateX(185%);opacity:1}}',
       '.dd-row-side{flex:none;display:flex;align-items:center;gap:10px;font-size:12.5px;color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums}',
       '.dd-row-pill{font-size:11px;line-height:18px;padding:0 7px;border-radius:999px;border:1px solid currentColor;white-space:nowrap}',
