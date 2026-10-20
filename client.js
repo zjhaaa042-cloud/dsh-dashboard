@@ -734,7 +734,7 @@ window.__ModuleLoader__.load({
             isTask && item.task.next === true ? h('span', { key: 'next', className: 'dd-tag dd-tag-next' }, t('task.nextTag')) : null,
             item.kind === 'extract' ? h('span', { key: 'kind', className: 'dd-tag dd-tag-extract' }, t('tag.extract')) : null,
             isTransfer && transferInfo !== null ? h('span', { key: 'direction', className: 'dd-tag dd-tag-transfer' }, `${transferInfo.arrow} ${transferInfo.label}`) : null,
-            isTask && item.task.ai === true ? h('span', { key: 'ai', className: 'dd-tag dd-tag-ai', title: item.task.aiDetail ?? '' }, t('tag.ai')) : null,
+            isTask && item.task.ai === true ? h('span', { key: 'ai', className: 'dd-tag dd-tag-ai', title: `${item.task.aiDetail ?? ''}${typeof item.task.aiConfidence === 'number' ? ` · ${Math.round(item.task.aiConfidence * 100)}%` : ''}` }, t('tag.ai')) : null,
             downloading && item.progress.stalled === true ? h('span', { key: 'stalled', className: 'dd-tag dd-tag-stalled' }, t('tag.stalled')) : null,
             item.tag ? h('span', { key: 'tag', className: 'dd-tag', title: item.tag }, item.tag) : null,
           ]),
@@ -862,7 +862,7 @@ window.__ModuleLoader__.load({
             typeof item.task.dependencies === 'string' && item.task.dependencies !== '' ? meta(t('detail.dependencies'), item.task.dependencies) : null,
             typeof item.task.owner === 'string' && item.task.owner !== '' ? meta(t('detail.owner'), item.task.owner) : null,
             typeof item.task.scope === 'string' && item.task.scope !== '' ? meta(t('detail.scope'), item.task.scope) : null,
-            item.task.ai === true ? meta(t('detail.ai'), item.task.aiDetail !== '' ? item.task.aiDetail : item.detail) : null,
+            item.task.ai === true ? meta(t('detail.ai'), `${item.task.aiDetail !== '' ? item.task.aiDetail : item.detail}${typeof item.task.aiConfidence === 'number' ? ` · ${Math.round(item.task.aiConfidence * 100)}%` : ''}`) : null,
             typeof item.task.evidence === 'string' && item.task.evidence !== '' ? meta(t('detail.evidence'), item.task.evidence) : null,
             typeof item.task.estimate === 'string' && item.task.estimate !== '' ? meta(t('detail.estimate'), item.task.estimate) : null,
           ].filter(Boolean)

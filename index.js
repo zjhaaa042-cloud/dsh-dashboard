@@ -1818,10 +1818,12 @@ function normalizeAiOverrides(reply, tasks) {
     if (entry === null || typeof entry !== 'object') continue
     const id = String(entry.id ?? '').trim().toUpperCase()
     if (!known.has(id)) continue
+    const confidence = typeof entry.confidence === 'number' && Number.isFinite(entry.confidence) ? Math.max(0, Math.min(1, entry.confidence)) : 0
+    if (confidence < 0.6) continue
     const status = entry.status === 'done' ? 'done' : entry.status === 'running' ? 'running' : entry.status === 'blocked' ? 'blocked' : 'pending'
     const percent = typeof entry.percent === 'number' && Number.isFinite(entry.percent) ? Math.max(0, Math.min(100, Math.round(entry.percent))) : null
     const detail = typeof entry.detail === 'string' ? entry.detail.trim().slice(0, 120) : ''
-    overrides.push({ id, status, percent, detail })
+    overrides.push({ id, status, percent, detail, confidence })
   }
   return overrides
 }
@@ -1844,6 +1846,7 @@ function applyAiOverrides(tasks, overrides, aiState) {
     item.task.percent = override.status === 'done' ? 100 : override.percent ?? item.task.percent
     item.task.ai = true
     item.task.aiDetail = override.detail
+    item.task.aiConfidence = override.confidence
     if (override.detail !== '') item.detail = override.detail
   }
   const taskItems = items.filter(item => item.kind === 'task')
@@ -1881,12 +1884,23 @@ async function runAiTaskInference(aiContext, options, tasks, digest) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 30000)
   try {
+    const now = Math.floor(Date.now() / 1000)
+    const evidence = {
+      processes: digest.processes,
+      logs: digest.logs.map(entry => ({ ...entry, ageS: typeof entry.m === 'number' ? now - entry.m : null })),
+      artifacts: digest.artifacts.map(entry => ({ ...entry, ageS: typeof entry.m === 'number' ? now - entry.m : null })),
+    }
     const prompt = [
       'You maintain a project task board. Use only the plan and evidence below; do not invent tasks.',
-      'Return ONLY JSON: {"tasks":[{"id":"<plan id>","status":"done|running|pending|blocked","percent":0-100,"detail":"<=60 chars"}]}',
+      'Return ONLY JSON: {"tasks":[{"id":"<plan id>","status":"done|running|pending|blocked","percent":0-100,"detail":"<=60 chars","confidence":0-1}]}',
       'Only include tasks whose inferred state differs from its PLAN status; omit unchanged tasks. Keep ids exact. No prose.',
+      'Evidence rules:',
+      '- running: only with a live matching process, or a file/log whose ageS <= 900; mere existence of a log is NOT enough.',
+      '- done: only with a concrete acceptance artifact; a log name alone is not done.',
+      '- pending/blocked: only with explicit evidence; otherwise omit.',
+      '- confidence must reflect the evidence; omit anything below 0.6.',
       `PLAN=${JSON.stringify(digest.plan)}`,
-      `EVIDENCE=${JSON.stringify({ processes: digest.processes, logs: digest.logs, artifacts: digest.artifacts })}`,
+      `EVIDENCE=${JSON.stringify(evidence)}`,
     ].join('\n')
     const request = {
       provider: route.provider,
